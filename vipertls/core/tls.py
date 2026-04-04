@@ -29,7 +29,13 @@ class _OpenSSLLib:
         # Without pre-registering that directory, ctypes raises OSError even when
         # the path is correct.  os.add_dll_directory() (Python 3.8+) fixes this.
         # We intentionally do NOT close the cookies so the dirs stay registered
-        # for the lifetime of the process — subsequent ctypes calls still need them.
+        # for the lifetime of the process — subsequent ctypes calls still  need them.
+#i fucking wonder why do i waste my time on that shit
+
+
+ 
+
+        
         if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
             _seen_dirs: set[str] = set()
             for c in candidates:
