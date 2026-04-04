@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vipertls"
+version = "0.1.1"
+description = "Pure Python TLS fingerprint spoofing client with browser challenge fallback."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "vipertls" }]
+dependencies = [
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.29.0",
+  "h2>=4.1.0",
+  "cryptography>=42.0.0",
+  "charset-normalizer>=3.3.2",
+  "brotli>=1.1.0",
+  "zstandard>=0.22.0",
+  "playwright>=1.40.0",
+  "playwright-stealth>=2.0.0",
+  "rich>=13.7.0",
+]
+keywords = ["tls", "ja3", "http2", "playwright", "cloudflare"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/youruser/vipertls"
+
+[project.scripts]
+vipertls = "vipertls.__main__:main"
+vipertls-install-browsers = "install_browsers:main"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["install_browsers"]
+
+[tool.setuptools.packages.find]
+include = ["vipertls*"]
