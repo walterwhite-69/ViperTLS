@@ -23,7 +23,7 @@ from vipertls.fingerprints.presets import PRESETS
 
 console = Console()
 
-_VERSION = "0.1.0"
+_VERSION = "0.1.1"
 _PRESETS_ORDER = [
     ("chrome_145", "Google Chrome"),
     ("chrome_140", "Google Chrome"),
