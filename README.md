@@ -359,7 +359,7 @@ The dashboard shows live spinners for in-flight requests, color-coded status cod
 
 ```
 ╭─────────────────────────────────────────────────────────────────╮
-│  ⚡ V I P E R TLS  v0.1.0   ·   Live Request Monitor           │
+│  ⚡ V I P E R TLS  v0.1.1   ·   Live Request Monitor           │
 ╰─────────────────────────────────────────────────────────────────╯
   ◉ 9 requests   ✓ 7 ok   ✗ 2 failed   ⏱ 312ms avg   ↓ 187.4 KB
 
