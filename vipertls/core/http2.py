@@ -23,6 +23,16 @@ _HOP_BY_HOP = frozenset([
     "te", "trailers", "transfer-encoding", "upgrade",
 ])
 
+_CHROMIUM_PRIORITY_PREFACE = (
+    (3, 201, 0, True),
+    (5, 101, 0, True),
+    (7, 1, 0, True),
+    (9, 1, 7, True),
+    (11, 1, 3, True),
+)
+
+_CHROMIUM_PRIORITY_FAMILIES = ("chrome", "edge", "brave", "opera")
+
 
 def _parse_h2_fingerprint(fingerprint: str) -> tuple[dict, int, list[str]]:
     parts = fingerprint.split("|")
@@ -101,15 +111,16 @@ class HTTP2Connection:
     def __init__(self, ssl_sock: ssl.SSLSocket, preset: BrowserPreset) -> None:
         self._sock = ssl_sock
         self._preset = preset
+        self._priority_enabled = any(name in preset.name.lower() for name in _CHROMIUM_PRIORITY_FAMILIES)
         self._settings, self._window_increment, self._pseudo_order = _parse_h2_fingerprint(
             preset.http2_fingerprint
         )
         self._conn = h2.connection.H2Connection(
             config=h2.config.H2Configuration(client_side=True, header_encoding="utf-8")
         )
-        # Seed h2 with the browser's initial SETTINGS values up front so the
-        # first outbound SETTINGS frame matches the preset instead of h2's
-        # library defaults.
+                                                                            
+                                                                          
+                           
         self._conn.local_settings = h2.settings.Settings(
             client=True,
             initial_values=self._settings,
@@ -128,6 +139,17 @@ class HTTP2Connection:
         data = self._sock.recv(65535)
         return data if data else None
 
+    def _send_priority_preface(self) -> None:
+        if not self._priority_enabled:
+            return
+        for stream_id, weight, depends_on, exclusive in _CHROMIUM_PRIORITY_PREFACE:
+            self._conn.prioritize(
+                stream_id=stream_id,
+                weight=weight,
+                depends_on=depends_on,
+                exclusive=exclusive,
+            )
+
     def request(
         self,
         method: str,
@@ -144,6 +166,7 @@ class HTTP2Connection:
         if self._window_increment > 0:
             self._conn.increment_flow_control_window(self._window_increment)
 
+        self._send_priority_preface()
         self._flush()
 
         stream_id = self._conn.get_next_available_stream_id()
@@ -153,11 +176,25 @@ class HTTP2Connection:
         )
 
         if body:
-            self._conn.send_headers(stream_id, header_list, end_stream=False)
+            self._conn.send_headers(
+                stream_id,
+                header_list,
+                end_stream=False,
+                priority_weight=42 if self._priority_enabled else None,
+                priority_depends_on=11 if self._priority_enabled else None,
+                priority_exclusive=self._priority_enabled or None,
+            )
             self._flush()
             self._conn.send_data(stream_id, body, end_stream=True)
         else:
-            self._conn.send_headers(stream_id, header_list, end_stream=True)
+            self._conn.send_headers(
+                stream_id,
+                header_list,
+                end_stream=True,
+                priority_weight=42 if self._priority_enabled else None,
+                priority_depends_on=11 if self._priority_enabled else None,
+                priority_exclusive=self._priority_enabled or None,
+            )
 
         self._flush()
 
@@ -217,7 +254,10 @@ class HTTP2Connection:
 
         return ViperResponse(
             status_code=status_code,
-            headers=resp_headers,
+            headers={
+                **resp_headers,
+                "x-vipertls-h2-priority": "true" if self._priority_enabled else "false",
+            },
             content=b"".join(body_chunks),
             url=target_url,
             http_version="HTTP/2",

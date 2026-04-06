@@ -16,7 +16,7 @@ class BrowserPreset:
 
 PRESETS: dict[str, BrowserPreset] = {
 
-    # ── Chrome ────────────────────────────────────────────────────────────────
+                                                                                
 
     "chrome_120": BrowserPreset(
         name="chrome_120",
@@ -327,7 +327,7 @@ PRESETS: dict[str, BrowserPreset] = {
         },
     ),
 
-    # ── Firefox ───────────────────────────────────────────────────────────────
+                                                                                
 
     "firefox_120": BrowserPreset(
         name="firefox_120",
@@ -454,7 +454,7 @@ PRESETS: dict[str, BrowserPreset] = {
         },
     ),
 
-    # ── Safari ────────────────────────────────────────────────────────────────
+                                                                                
 
     "safari_17": BrowserPreset(
         name="safari_17",
@@ -520,7 +520,7 @@ PRESETS: dict[str, BrowserPreset] = {
         },
     ),
 
-    # ── Edge (Chromium) ───────────────────────────────────────────────────────
+                                                                                
 
     "edge_133": BrowserPreset(
         name="edge_133",
@@ -612,7 +612,7 @@ PRESETS: dict[str, BrowserPreset] = {
         },
     ),
 
-    # ── Brave ─────────────────────────────────────────────────────────────────
+                                                                                
 
     "brave_136": BrowserPreset(
         name="brave_136",
@@ -657,7 +657,7 @@ PRESETS: dict[str, BrowserPreset] = {
         },
     ),
 
-    # ── Opera ─────────────────────────────────────────────────────────────────
+                                                                                
 
     "opera_117": BrowserPreset(
         name="opera_117",

@@ -26,7 +26,17 @@ def _script_runtime_home() -> Path | None:
         return None
     if resolved.name.lower() in {"vipertls", "vipertls.exe", "python", "python.exe", "pythonw.exe"}:
         return None
-    return resolved.parent / ".vipertls"
+    return resolved.parent / "vipertls"
+
+
+def _cwd_runtime_home() -> Path | None:
+    try:
+        cwd = Path.cwd().resolve()
+    except Exception:
+        return None
+    if not cwd.exists() or not cwd.is_dir():
+        return None
+    return cwd / "vipertls"
 
 
 def _default_runtime_home() -> Path:
@@ -40,6 +50,10 @@ def _default_runtime_home() -> Path:
     script_home = _script_runtime_home()
     if script_home is not None:
         return script_home
+
+    cwd_home = _cwd_runtime_home()
+    if cwd_home is not None:
+        return cwd_home
 
     if os.name == "nt":
         base = Path(os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))

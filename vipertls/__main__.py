@@ -58,6 +58,11 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["chromium", "firefox", "webkit"],
         help="Browser target to install (repeatable)",
     )
+    install.add_argument(
+        "--with-deps",
+        action="store_true",
+        help="On Linux, ask Playwright to install required system dependencies too.",
+    )
 
     subparsers.add_parser("paths", help="Show the active runtime directories")
     subparsers.add_parser("version", help="Show the installed ViperTLS version")
@@ -82,7 +87,7 @@ def main() -> None:
         return
 
     if args.command == "install-browsers":
-        raise SystemExit(install_playwright_browsers(args.browsers or ["chromium"]))
+        raise SystemExit(install_playwright_browsers(args.browsers or ["chromium"], with_deps=args.with_deps))
 
     if args.command == "serve":
         print(f"ViperTLS server starting on {args.host}:{args.port}", flush=True)

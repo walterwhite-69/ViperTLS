@@ -1,8 +1,8 @@
-"""Public Python API for ViperTLS.
-
-Use ``vipertls.AsyncClient`` or ``vipertls.Client`` for requests, and the
-helper functions below for runtime and solver-cache management.
-"""
+\
+\
+\
+\
+   
 
 from .client import AsyncClient, Client
 from .tui import ViperDashboard
@@ -11,7 +11,7 @@ from .fingerprints.presets import resolve_preset, PRESETS, BrowserPreset
 from .runtime import describe_runtime_paths
 from .solver.browser import clear_cache as clear_solver_cache
 
-__version__ = "0.1.1"
+__version__ = "0.1.3"
 __all__ = [
     "AsyncClient",
     "Client",
@@ -29,11 +29,11 @@ __all__ = [
 
 
 def get_runtime_paths() -> dict[str, str]:
-    """Return the active ViperTLS runtime paths.
-
-    The returned mapping includes the writable home directory, the Playwright
-    browser directory, and the solver cookie cache file path.
-    """
+\
+\
+\
+\
+       
     return describe_runtime_paths()
 
 

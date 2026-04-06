@@ -5,13 +5,6 @@ from typing import Any
 
 
 class ViperResponse:
-    """Normalized HTTP response returned by ViperTLS clients.
-
-    Besides the usual status, headers, text, and JSON helpers, this object also
-    exposes ViperTLS-specific metadata such as ``solved_by``,
-    ``cookies_received``, ``cookies_used``, and ``solve_info``.
-    """
-
     def __init__(
         self,
         status_code: int,
@@ -126,11 +119,26 @@ class ViperResponse:
         return self._parse_json_header("x-vipertls-used-cookies") or self._parse_json_header("x-viper-used-cookies")
 
     @property
+    def tls_resumed(self) -> bool:
+        return self.headers.get("x-vipertls-tls-resumed", "").lower() == "true"
+
+    @property
+    def h2_priority(self) -> bool:
+        return self.headers.get("x-vipertls-h2-priority", "").lower() == "true"
+
+    @property
+    def ja4_profile(self) -> str:
+        return self.headers.get("x-vipertls-ja4-profile", "")
+
+    @property
     def solve_info(self) -> dict[str, Any]:
         return {
             "solved_by": self.solved_by,
             "from_cache": self.from_cache,
             "http_version": self.http_version,
+            "tls_resumed": self.tls_resumed,
+            "h2_priority": self.h2_priority,
+            "ja4_profile": self.ja4_profile,
             "cookies_received": self.cookies_received,
             "cookies_used": self.cookies_used,
         }

@@ -81,6 +81,24 @@ def _solver_debug(message: str) -> None:
         print(message)
 
 
+def _short_failure_reason(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return "unknown"
+    lower = text.lower()
+    if "cname cross-user banned" in lower:
+        return "cloudflare banned page"
+    if ".so" in lower or "shared library" in lower or "shared object" in lower or "libnss" in lower:
+        return "missing browser dependency"
+    if "target page, context or browser has been closed" in lower or "browser has been closed" in lower:
+        return "browser crashed"
+    if "just a moment" in lower or "verify you are human" in lower or "challenge" in lower:
+        return "stuck on challenge page"
+    if "timeout" in lower:
+        return "timeout"
+    return text[:120]
+
+
 def _browser_family_from_path(executable_path: str | None) -> str:
     path = (executable_path or "").lower()
     if "msedge" in path or "edge" in path:
@@ -174,6 +192,28 @@ def _find_chrome_exec() -> Optional[str]:
 
 def _find_browser_exec(family: str) -> Optional[str]:
     family = (family or "chrome").lower()
+    search_roots = [
+        str(_LOCAL_BROWSERS),
+        os.path.expanduser("~/.cache/ms-playwright"),
+        os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright"),
+    ]
+    patterns_map = {
+        "edge": ["edge-local/*/msedge.exe"],
+        "brave": [],
+        "opera": [],
+        "chrome": [
+            "chromium-*/chrome-win/chrome.exe",
+            "chromium-*/chrome-linux64/chrome",
+            "chromium-*/chrome-linux/chrome",
+            "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        ],
+    }
+    for root in search_roots:
+        for pat in patterns_map.get(family, []) + patterns_map["chrome"]:
+            matches = sorted(glob.glob(os.path.join(root, pat)), reverse=True)
+            if matches:
+                return matches[0]
+
     system_candidates_map = {
         "edge": [
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
@@ -202,20 +242,8 @@ def _find_browser_exec(family: str) -> Optional[str]:
             return expanded
 
     _ensure_local_playwright_browser()
-
-    search_roots = [
-        str(_LOCAL_BROWSERS),
-        os.path.expanduser("~/.cache/ms-playwright"),
-        os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright"),
-    ]
-    patterns = [
-        "chromium-*/chrome-win/chrome.exe",
-        "chromium-*/chrome-linux64/chrome",
-        "chromium-*/chrome-linux/chrome",
-        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-    ]
     for root in search_roots:
-        for pat in patterns:
+        for pat in patterns_map.get(family, []) + patterns_map["chrome"]:
             matches = sorted(glob.glob(os.path.join(root, pat)), reverse=True)
             if matches:
                 return matches[0]
@@ -236,7 +264,7 @@ def _ensure_local_playwright_browser() -> None:
     try:
         from install_browsers import install_playwright_browsers
 
-        if install_playwright_browsers(["chromium"]) == 0:
+        if install_playwright_browsers(["chromium"], with_deps=(os.name != "nt")) == 0:
             configure_playwright_env()
     except Exception:
         pass
@@ -282,6 +310,7 @@ class SolveResult:
     method: str
     elapsed_ms: float
     headers: dict[str, str] = field(default_factory=dict)
+    reason: str = ""
 
 
 @dataclass
@@ -943,6 +972,7 @@ class CloudflareSolver:
                     user_agent=ua,
                     headers=hints,
                     elapsed_ms=(time.perf_counter() - t0) * 1000,
+                    reason="",
                 )
 
             initial_title, initial_html, initial_cookies = await _capture_page_state(page, ctx)
@@ -980,8 +1010,12 @@ class CloudflareSolver:
                 url=page.url,
                 cookies={},
                 user_agent=user_agent,
-                headers=headers,
+                headers={
+                    **headers,
+                    "x-vipertls-failure-reason": _short_failure_reason(final_title or failed_html),
+                },
                 elapsed_ms=(time.perf_counter() - t0) * 1000,
+                reason=_short_failure_reason(final_title or failed_html),
             )
         finally:
             await page.close()
@@ -1033,17 +1067,31 @@ class CloudflareSolver:
             attempts.append({"headless": False, "full_resources": True})
         last_result = None
         for attempt in attempts:
-            result = await self._run_browser_attempt(
-                url,
-                user_agent,
-                preset,
-                domain,
-                t0,
-                timeout=timeout,
-                headless=attempt["headless"],
-                full_resources=attempt["full_resources"],
-                cached=cached,
-            )
+            try:
+                result = await self._run_browser_attempt(
+                    url,
+                    user_agent,
+                    preset,
+                    domain,
+                    t0,
+                    timeout=timeout,
+                    headless=attempt["headless"],
+                    full_resources=attempt["full_resources"],
+                    cached=cached,
+                )
+            except Exception as exc:
+                reason = _short_failure_reason(str(exc))
+                result = SolveResult(
+                    status=403,
+                    method="browser_failed",
+                    html="",
+                    url=url,
+                    cookies={},
+                    user_agent=user_agent,
+                    elapsed_ms=(time.perf_counter() - t0) * 1000,
+                    headers={"x-vipertls-failure-reason": reason},
+                    reason=reason,
+                )
             if result.status == 200:
                 return result
             last_result = result
@@ -1056,6 +1104,8 @@ class CloudflareSolver:
             cookies={},
             user_agent=user_agent,
             elapsed_ms=(time.perf_counter() - t0) * 1000,
+            headers={"x-vipertls-failure-reason": "unknown"},
+            reason="unknown",
         )
 
     async def close(self) -> None:

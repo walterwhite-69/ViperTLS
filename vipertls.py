@@ -5,13 +5,7 @@ import threading
 import time
 import signal
 import argparse
-
-if os.name == "nt":
-    import msvcrt
-else:
-    import select
-    import termios
-    import tty
+import msvcrt
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -66,44 +60,10 @@ _start_time = time.monotonic()
 _stats = {"total": 0, "ok": 0, "err": 0, "bytes": 0, "ms": 0.0}
 _current_view = "main"
 _selected_family_idx = 0
-_stdin_fd = None
-_stdin_attrs = None
 
 
 def _clock_now() -> str:
     return time.strftime("%I:%M:%S %p").lstrip("0")
-
-
-def _input_ready() -> bool:
-    if os.name == "nt":
-        return msvcrt.kbhit()
-    if not sys.stdin.isatty():
-        return False
-    readable, _, _ = select.select([sys.stdin], [], [], 0)
-    return bool(readable)
-
-
-def _read_key() -> str | None:
-    if not _input_ready():
-        return None
-    if os.name == "nt":
-        return msvcrt.getwch()
-    return sys.stdin.read(1)
-
-
-def _setup_input() -> None:
-    global _stdin_fd, _stdin_attrs
-    if os.name == "nt" or not sys.stdin.isatty():
-        return
-    _stdin_fd = sys.stdin.fileno()
-    _stdin_attrs = termios.tcgetattr(_stdin_fd)
-    tty.setcbreak(_stdin_fd)
-
-
-def _restore_input() -> None:
-    if os.name == "nt" or _stdin_fd is None or _stdin_attrs is None:
-        return
-    termios.tcsetattr(_stdin_fd, termios.TCSADRAIN, _stdin_attrs)
 
 
 def _install_middleware() -> None:
@@ -518,10 +478,8 @@ def _render(host: str, port: int) -> Group:
 
 def _poll_input() -> None:
     global _current_view, _selected_family_idx
-    while True:
-        ch = _read_key()
-        if not ch:
-            break
+    while msvcrt.kbhit():
+        ch = msvcrt.getwch()
         if ch == "1":
             _current_view = "main"
         elif ch == "2":
@@ -570,17 +528,13 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    _setup_input()
-    try:
-        with Live(
-            _render(host, port), console=console, refresh_per_second=4, screen=True
-        ) as live:
-            while True:
-                _poll_input()
-                live.update(_render(host, port))
-                time.sleep(0.25)
-    finally:
-        _restore_input()
+    with Live(
+        _render(host, port), console=console, refresh_per_second=4, screen=True
+    ) as live:
+        while True:
+            _poll_input()
+            live.update(_render(host, port))
+            time.sleep(0.25)
 
 
 if __name__ == "__main__":

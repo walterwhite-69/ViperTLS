@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from typing import Optional
 from urllib.parse import urlparse, urlencode, urljoin
 
@@ -48,11 +49,26 @@ def _attach_used_cookie_headers(response: ViperResponse, headers: dict[str, str]
     response.headers["x-vipertls-used-cookies"] = json.dumps(used, separators=(",", ":"))
 
 
+def _attach_transport_metadata(
+    response: ViperResponse,
+    *,
+    tls_resumed: bool | None = None,
+    h2_priority: bool | None = None,
+) -> None:
+    if tls_resumed is not None:
+        response.headers["x-vipertls-tls-resumed"] = "true" if tls_resumed else "false"
+    if h2_priority is not None and "x-vipertls-h2-priority" not in response.headers:
+        response.headers["x-vipertls-h2-priority"] = "true" if h2_priority else "false"
+    if response.http_version == "HTTP/2":
+        if response.headers.get("x-vipertls-h2-priority") == "true":
+            response.headers["x-vipertls-ja4-profile"] = "chromium-h2-priority"
+        else:
+            response.headers["x-vipertls-ja4-profile"] = "standard-h2"
+    else:
+        response.headers["x-vipertls-ja4-profile"] = "http1"
+
+
 def _build_ch_hints(preset: BrowserPreset, critical_ch_header: str) -> dict[str, str]:
-    """
-    Build Client Hint headers for a Cloudflare critical-ch retry.
-    When CF returns critical-ch, a real browser retries with the listed headers.
-    """
     requested = {h.strip().lower() for h in critical_ch_header.split(",")}
     hints: dict[str, str] = {}
 
@@ -92,12 +108,6 @@ def _build_ch_hints(preset: BrowserPreset, critical_ch_header: str) -> dict[str,
 
 
 def _inject_extended_ch(preset: BrowserPreset, headers: dict[str, str]) -> None:
-    """
-    Proactively inject extended Client Hint headers for Chromium-based presets.
-    Chrome sends these automatically on sites where Accept-CH has been cached
-    (which includes all Cloudflare-protected sites after the first visit).
-    Sending them upfront avoids the critical-ch challenge entirely.
-    """
     ua = preset.user_agent
     m = re.search(r"Chrome/([\d.]+)", ua)
     full_version = m.group(1) if m else "124.0.6367.60"
@@ -164,22 +174,26 @@ async def _solve_cloudflare_challenge(
     response.headers["x-vipertls-solved-by"] = "solving"
     
     solver = await get_solver()
+    started = time.perf_counter()
     try:
         solved = await solver.solve(url=url, user_agent=preset.user_agent, preset=preset.name)
-    except Exception:
+    except Exception as exc:
         if debug:
-            debug("Challenge solve failed")
+            debug(f"Failed to complete challenge reason: {str(exc)[:120]}")
         return None
 
     if debug:
         if solved.method in {"browser", "cache"} and (solved.status or 0) < 400:
-            debug(f"Challenge solved via {solved.method}")
+            elapsed = solved.elapsed_ms or ((time.perf_counter() - started) * 1000)
+            debug(f"Solved JS challenge via {solved.method} ({elapsed / 1000:.2f}s)")
         else:
-            debug("Challenge solve failed")
+            reason = solved.reason or solved.headers.get("x-vipertls-failure-reason", "unknown")
+            debug(f"Failed to complete challenge reason: {reason}")
 
     headers = {
         "content-type": "text/html; charset=utf-8",
         "x-vipertls-solved-by": solved.method,
+        **solved.headers,
     }
     set_cookies = [f"{k}={v}" for k, v in solved.cookies.items()]
 
@@ -194,15 +208,6 @@ async def _solve_cloudflare_challenge(
 
 
 class AsyncClient:
-    """Async ViperTLS client.
-
-    Use this client when you want browser-like TLS fingerprints with optional
-    browser challenge fallback. Typical usage:
-
-        async with vipertls.AsyncClient(impersonate="edge_133") as client:
-            response = await client.get("https://example.com")
-    """
-
     def __init__(
         self,
         impersonate: str = "chrome_124",
@@ -395,11 +400,12 @@ class AsyncClient:
                 verify=self._verify,
             )
             negotiated = ssl_sock.selected_alpn_protocol()
+            tls_resumed = bool(getattr(ssl_sock, "session_reused", False))
 
             if negotiated == "h2":
                 conn = HTTP2Connection(ssl_sock, self._preset)
                 try:
-                    return conn.request(
+                    response = conn.request(
                         method=method,
                         host=host,
                         scheme=scheme,
@@ -409,11 +415,17 @@ class AsyncClient:
                         body=body,
                         target_url=target_url,
                     )
+                    _attach_transport_metadata(
+                        response,
+                        tls_resumed=tls_resumed,
+                        h2_priority=response.headers.get("x-vipertls-h2-priority") == "true",
+                    )
+                    return response
                 finally:
                     conn.close()
             else:
                 try:
-                    return http1_request(
+                    response = http1_request(
                         ssl_sock=ssl_sock,
                         method=method,
                         host=host,
@@ -424,6 +436,8 @@ class AsyncClient:
                         body=body,
                         target_url=target_url,
                     )
+                    _attach_transport_metadata(response, tls_resumed=tls_resumed, h2_priority=False)
+                    return response
                 finally:
                     try:
                         ssl_sock.close()
@@ -432,7 +446,7 @@ class AsyncClient:
         else:
             plain_sock = raw_sock or socket.create_connection((host, port), timeout=self._timeout)
             try:
-                return http1_request(
+                response = http1_request(
                     ssl_sock=plain_sock,
                     method=method,
                     host=host,
@@ -443,6 +457,8 @@ class AsyncClient:
                     body=body,
                     target_url=target_url,
                 )
+                _attach_transport_metadata(response, tls_resumed=False, h2_priority=False)
+                return response
             finally:
                 try:
                     plain_sock.close()
@@ -475,12 +491,6 @@ class AsyncClient:
 
 
 class Client:
-    """Synchronous wrapper around ``AsyncClient``.
-
-    This is useful when you do not want to manage an asyncio event loop
-    yourself.
-    """
-
     def __init__(self, **kwargs) -> None:
         self._async_client = AsyncClient(**kwargs)
 

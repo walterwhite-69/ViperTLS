@@ -5,6 +5,7 @@ import struct
 import ctypes
 import ctypes.util
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -25,17 +26,11 @@ class _OpenSSLLib:
     def _load(self) -> None:
         candidates = self._candidate_paths()
 
-        # On Windows, libssl-3.dll depends on libcrypto-3.dll in the same dir.
-        # Without pre-registering that directory, ctypes raises OSError even when
-        # the path is correct.  os.add_dll_directory() (Python 3.8+) fixes this.
-        # We intentionally do NOT close the cookies so the dirs stay registered
-        # for the lifetime of the process — subsequent ctypes calls still  need them.
-#i fucking wonder why do i waste my time on that shit
-
-
- 
-
-        
+                                                                              
+                                                                                 
+                                                                                
+                                                                               
+                                                                                    
         if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
             _seen_dirs: set[str] = set()
             for c in candidates:
@@ -43,7 +38,7 @@ class _OpenSSLLib:
                 if dll_dir not in _seen_dirs:
                     _seen_dirs.add(dll_dir)
                     try:
-                        # Store on class so the GC doesn't close these cookies.
+                                                                               
                         if not hasattr(self, "_dll_dir_cookies"):
                             self._dll_dir_cookies = []
                         self._dll_dir_cookies.append(os.add_dll_directory(dll_dir))
@@ -70,17 +65,17 @@ class _OpenSSLLib:
             seen.add(path)
             candidates.append(path)
 
-        # Ask the platform loader first.
+                                        
         for name in self._find_library_names():
             found = ctypes.util.find_library(name)
             if found:
                 add(found)
 
-        # CPython on Windows bundles libssl in the install's DLL directories.
+                                                                             
         for path in self._bundled_library_paths():
             add(path)
 
-        # Common direct soname/dll fallbacks.
+                                             
         for path in self._fallback_library_names():
             add(path)
 
@@ -94,7 +89,7 @@ class _OpenSSLLib:
         return ["ssl", "libssl"]
 
     def _bundled_library_paths(self) -> list[Path]:
-        # Collect root directories to search, deduped.
+                                                      
         root_seen: set[Path] = set()
         roots: list[Path] = []
 
@@ -107,34 +102,34 @@ class _OpenSSLLib:
                 root_seen.add(p)
                 roots.append(p)
 
-        # The directory that contains the Python executable.
+                                                            
         exe_dir = Path(sys.executable).resolve().parent
         _add_root(exe_dir)
         _add_root(exe_dir / "DLLs")
 
-        # The directory that contains the compiled _ssl extension.
+                                                                  
         try:
             _add_root(Path(ssl._ssl.__file__).resolve().parent)
         except AttributeError:
             pass
 
-        # ViperTLS bundled bin directory (relative to this file: ../bin/)
+                                                                         
         pkg_bin = Path(__file__).resolve().parent.parent / "bin"
         if pkg_bin.exists():
             _add_root(pkg_bin)
 
-        # When running inside a virtual environment, sys.executable is the venv's
-        # Scripts/python.exe — but the actual OpenSSL DLLs live in the *base*
-        # Python installation (sys.base_prefix / DLLs).  This is the most common
-        # reason ctypes can't find libssl-3.dll on Windows.
+                                                                                 
+                                                                             
+                                                                                
+                                                           
         base = getattr(sys, "base_prefix", None) or sys.prefix
         if base and Path(base).resolve() != Path(sys.prefix).resolve():
             base_path = Path(base).resolve()
             _add_root(base_path)
             _add_root(base_path / "DLLs")
-            _add_root(base_path / "Library" / "bin")  # conda / Windows Store builds
+            _add_root(base_path / "Library" / "bin")                                
 
-        # Respect PYTHONHOME if set (e.g. custom embedded distributions).
+                                                                         
         python_home = os.environ.get("PYTHONHOME")
         if python_home:
             _add_root(Path(python_home))
@@ -172,7 +167,7 @@ class _OpenSSLLib:
         if not self._lib:
             return False
         
-        # 1. Try SSL_CTX_set1_groups_list (modern name)
+                                                       
         try:
             fn = self._lib.SSL_CTX_set1_groups_list
             fn.restype = ctypes.c_int
@@ -182,7 +177,7 @@ class _OpenSSLLib:
         except AttributeError:
             pass
 
-        # 2. Try SSL_CTX_set1_curves_list (older name/alias)
+                                                            
         try:
             fn = self._lib.SSL_CTX_set1_curves_list
             fn.restype = ctypes.c_int
@@ -192,13 +187,13 @@ class _OpenSSLLib:
         except AttributeError:
             pass
 
-        # 3. Fallback to SSL_CTX_ctrl (most reliable on Windows/Macros)
-        # #define SSL_CTRL_SET_GROUPS_LIST 92
+                                                                       
+                                             
         try:
             fn = self._lib.SSL_CTX_ctrl
             fn.restype = ctypes.c_long
             fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long, ctypes.c_char_p]
-            # args: ctx, cmd, larg, parg
+                                        
             return fn(ssl_ctx_ptr, 92, 0, groups.encode()) == 1
         except AttributeError:
             return False
@@ -216,11 +211,62 @@ class _OpenSSLLib:
 
 
 _openssl = _OpenSSLLib()
+_SESSION_CACHE: dict[tuple[str, int, str], object] = {}
+_SESSION_CACHE_LOCK = threading.Lock()
+_CONTEXT_CACHE: dict[tuple[object, ...], ssl.SSLContext] = {}
+_CONTEXT_CACHE_LOCK = threading.Lock()
+_CTX_PTR_SUPPORTED = sys.implementation.name == "cpython" and sys.version_info < (3, 13)
 
 
 def _extract_ssl_ctx_ptr(ctx: ssl.SSLContext) -> int:
+    if not _CTX_PTR_SUPPORTED:
+        raise RuntimeError("direct SSLContext pointer access is disabled on this Python build")
     raw = (ctypes.c_char * 24).from_address(id(ctx))
     return struct.unpack_from("Q", raw, 16)[0]
+
+
+def _get_cached_session(key: tuple[str, int, str] | None) -> object | None:
+    if key is None:
+        return None
+    with _SESSION_CACHE_LOCK:
+        return _SESSION_CACHE.get(key)
+
+
+def _store_cached_session(key: tuple[str, int, str] | None, sock: ssl.SSLSocket) -> None:
+    if key is None:
+        return
+    session = getattr(sock, "session", None)
+    if session is None:
+        return
+    with _SESSION_CACHE_LOCK:
+        _SESSION_CACHE[key] = session
+
+
+def _ja3_cache_key(ja3: JA3Spec | None) -> tuple[object, ...]:
+    if ja3 is None:
+        return ("preset",)
+    return (
+        "ja3",
+        ja3.tls_version,
+        tuple(ja3.cipher_ids),
+        tuple(ja3.extension_ids),
+        tuple(ja3.curve_ids),
+        tuple(ja3.point_formats),
+    )
+
+
+def _get_or_build_context(
+    preset: BrowserPreset,
+    ja3: Optional[JA3Spec],
+    verify: bool,
+) -> ssl.SSLContext:
+    key = (preset.name, verify, *_ja3_cache_key(ja3))
+    with _CONTEXT_CACHE_LOCK:
+        ctx = _CONTEXT_CACHE.get(key)
+        if ctx is None:
+            ctx = build_ssl_context(preset, ja3=ja3, verify=verify)
+            _CONTEXT_CACHE[key] = ctx
+        return ctx
 
 
 def build_ssl_context(preset: BrowserPreset, ja3: Optional[JA3Spec] = None, verify: bool = True) -> ssl.SSLContext:
@@ -288,13 +334,28 @@ def wrap_socket(
     host: str,
     ctx: ssl.SSLContext,
     server_side: bool = False,
+    session_key: tuple[str, int, str] | None = None,
 ) -> ssl.SSLSocket:
-    return ctx.wrap_socket(
-        raw_sock,
-        server_hostname=host if not server_side else None,
-        server_side=server_side,
-        do_handshake_on_connect=True,
-    )
+    kwargs = {
+        "server_hostname": host if not server_side else None,
+        "server_side": server_side,
+        "do_handshake_on_connect": True,
+    }
+    session = _get_cached_session(session_key)
+    if session is not None:
+        try:
+            sock = ctx.wrap_socket(raw_sock, session=session, **kwargs)
+            _store_cached_session(session_key, sock)
+            return sock
+        except TypeError:
+            pass
+        except ValueError:
+            pass
+        except ssl.SSLError:
+            pass
+    sock = ctx.wrap_socket(raw_sock, **kwargs)
+    _store_cached_session(session_key, sock)
+    return sock
 
 
 def open_tls_connection(
@@ -306,7 +367,7 @@ def open_tls_connection(
     timeout: int = 30,
     verify: bool = True,
 ) -> ssl.SSLSocket:
-    ctx = build_ssl_context(preset, ja3=ja3, verify=verify)
+    ctx = _get_or_build_context(preset, ja3=ja3, verify=verify)
 
     if proxy_sock is not None:
         raw = proxy_sock
@@ -314,4 +375,4 @@ def open_tls_connection(
     else:
         raw = socket.create_connection((host, port), timeout=timeout)
 
-    return wrap_socket(raw, host, ctx)
+    return wrap_socket(raw, host, ctx, session_key=(host, port, preset.name))
