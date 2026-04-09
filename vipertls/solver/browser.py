@@ -1,10 +1,13 @@
+
 import asyncio
 import glob
 import json
 import os
-import time
-import tempfile
 import re
+import subprocess
+import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -15,6 +18,24 @@ from playwright_stealth import Stealth
 
 from ..runtime import browsers_path, configure_playwright_env, solver_cookie_file
 from .stealth import build_stealth_script
+
+def _playwright_default_browsers_path():
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if "Install location:" in line:
+                raw = line.split("Install location:", 1)[1].strip()
+                return str(Path(raw).parent)
+    except Exception:
+        pass
+    return None
+
+
+_PLAYWRIGHT_CACHE_PATH = _playwright_default_browsers_path()
+
 
 _CHALLENGE_TITLES = {
     "just a moment",
@@ -197,6 +218,8 @@ def _find_browser_exec(family: str) -> Optional[str]:
         os.path.expanduser("~/.cache/ms-playwright"),
         os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright"),
     ]
+    if _PLAYWRIGHT_CACHE_PATH and _PLAYWRIGHT_CACHE_PATH not in search_roots:
+        search_roots.insert(0, _PLAYWRIGHT_CACHE_PATH)
     patterns_map = {
         "edge": ["edge-local/*/msedge.exe"],
         "brave": [],
