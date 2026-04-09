@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -95,8 +96,9 @@ def solver_cookie_file(create: bool = False) -> Path:
 
 
 def configure_playwright_env() -> Path:
-    path = browsers_path(create=True)
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(path))
+    path = browsers_path()
+    if path.exists() and any(path.glob("chromium*")):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(path)
     return path
 
 
