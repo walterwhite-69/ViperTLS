@@ -11,9 +11,10 @@
 
 **Pure Python TLS fingerprint spoofing with browser challenge fallback. No curl_cffi. No Go binary. No excuses.**
 
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10--3.14-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![HTTP/2](https://img.shields.io/badge/HTTP%2F2-%E2%9C%93-brightgreen?style=flat-square)](https://http2.github.io)
+[![HTTP/3](https://img.shields.io/badge/HTTP%2F3-%E2%9C%93-brightgreen?style=flat-square)](https://http3.net)
 [![Cloudflare](https://img.shields.io/badge/Cloudflare-bypassed-orange?style=flat-square&logo=cloudflare&logoColor=white)](https://cloudflare.com)
 [![Bugs](https://img.shields.io/badge/bugs-probably%20some-red?style=flat-square)](https://github.com)
 [![Vibes](https://img.shields.io/badge/vibes-immaculate-purple?style=flat-square)](https://github.com)
@@ -26,17 +27,18 @@
 
 ViperTLS is a **pure Python HTTP client** that makes your requests look like they're coming from a real browser at the TLS level. It spoofs:
 
-- **JA3 / JA4** — The TLS ClientHello fingerprint
+- **JA3 / JA4 family** — The full TLS ClientHello fingerprint suite: JA4, JA4_r, JA4H, JA4S, JA4L
 - **HTTP/2 SETTINGS frames** — The window sizes, header table sizes, and frame ordering that real browsers negotiate
 - **HTTP/2 pseudo-header order** — Chrome sends `:method :authority :scheme :path`. Firefox does `:method :path :authority :scheme`.
 - **HTTP header ordering** — Because Cloudflare reads your headers like a suspicious bouncer reading a fake ID
+- **HTTP/3 / QUIC** — Browser-accurate QUIC transport parameters per browser family via aioquic
 
 The result: your Python script walks up to Cloudflare's velvet rope looking like Chrome in a suit, and gets waved straight through.
 
-When TLS fingerprinting is not enough and a site still throws a browser challenge, ViperTLS can escalate into a real browser solve, capture the useful cookies, and reuse them on later requests. So the practical request flow is:
+When TLS fingerprinting is not enough and a site still throws a browser challenge, ViperTLS escalates into a real browser solve, captures the useful cookies, and reuses them on later requests. So the practical request flow is:
 
-- **TLS** when the site is easy
-- **Browser** when the site needs a challenge solve
+- **TLS** when the site uses invisible Cloudflare or fingerprint-only checks
+- **Browser** when the site needs a full JS challenge solve
 - **Cache** when the site was already solved and the clearance cookies are still valid
 
 Think of it as [CycleTLS](https://github.com/Danny-Dasilva/CycleTLS) — but in pure Python, without spawning a Go subprocess, without curl_cffi, and without any of that compiled-binary nonsense.
@@ -58,13 +60,13 @@ ViperTLS         →  JA3: looks like a real browser          →  ALLOWED
 
 ViperTLS gets there by:
 
-1. Using `ssl.SSLContext.set_ciphers()` to set TLS 1.2 cipher order
-2. Using `ctypes` to call `SSL_CTX_set_ciphersuites()` directly on the `SSL_CTX*` pointer extracted from CPython internals for TLS 1.3 cipher ordering
-3. Using `ctypes` → `SSL_CTX_set1_groups_list()` for elliptic curve ordering
-4. Using the [`h2`](https://python-hyper.org/projects/h2/) library with custom SETTINGS and Chromium-style behavior injected before the request
-5. Sending HTTP headers in the exact order browsers actually send them
+1. Using **pyOpenSSL** (`OpenSSL.SSL.Context`) with cffi to set TLS 1.2 cipher order, TLS 1.3 cipher suites, and elliptic curve groups — without touching CPython internals, works on Python 3.10 through 3.14
+2. Using the [`h2`](https://python-hyper.org/projects/h2/) library with custom SETTINGS and Chromium-style behavior injected before the request
+3. Sending HTTP headers in the exact order browsers actually send them
+4. Computing and exposing the full **JA4 fingerprint family** on every response so you can verify what you're actually sending
+5. Falling back to a real Chromium instance when a site requires a JS challenge that TLS alone cannot beat
 
-No binary bridge. No subprocess wrapper. Just Python, ctypes, and questionable life choices.
+No binary bridge. No subprocess wrapper. No ctypes. Just Python, pyOpenSSL, and questionable life choices.
 
 ---
 
@@ -103,17 +105,29 @@ If the solver cannot find a local Chrome or Edge install, it can bootstrap Playw
 
 When you use ViperTLS from your own Python script as a module, it prefers a script-local `vipertls` folder next to that script, so solver cookies and browser assets stay bundled with the scraper project instead of getting mixed into one global cache.
 
-Python `3.12` is the recommended runtime. Hosted deployments should prefer Python `3.12`. Python `3.13` disables the fragile low-level OpenSSL pointer path to avoid crashes, so browser solving can still work but TLS fingerprint control may be less exact on that runtime.
+**Python 3.10 through 3.14 are all supported.** The TLS layer uses pyOpenSSL with cffi — no ctypes, no CPython internal pointer extraction, no version-specific hacks. Every binary dependency ships compatible wheels for all supported Python versions.
 
 ---
 
 ## System Requirements for Browser Fallback
 
-The browser challenge fallback (used when a site serves a JS challenge that TLS spoofing alone can't beat) runs a real Chromium instance. Chromium requires a set of shared libraries (`.so` files on Linux) to be present on your OS. If they're missing, you'll get `browser_failed` with `missing browser dependency`.
+The browser challenge fallback runs a real Chromium instance. Chromium requires a set of shared libraries (`.so` files on Linux) to be present on your OS. If they're missing, you'll get `browser_failed` with `missing browser dependency`.
+
+### Windows
+
+No extra steps. Chromium ships its own DLLs.
+
+### macOS
+
+Playwright handles everything — no extra steps needed after `vipertls install-browsers`. If Chromium still crashes, install XQuartz:
+
+```bash
+brew install --cask xquartz
+```
 
 ### Ubuntu / Debian / Kali / Pop!_OS
 
-The easiest path — Playwright can install everything for you:
+The easiest path — Playwright installs everything for you:
 
 ```bash
 pip install playwright
@@ -178,6 +192,7 @@ NixOS doesn't use a standard FHS filesystem so you can't use `apt` or `pacman`. 
     pkgs.udev
     pkgs.pango
     pkgs.cairo
+    pkgs.gtk3
     pkgs.xorg.libX11
     pkgs.xorg.libXcomposite
     pkgs.xorg.libXdamage
@@ -185,32 +200,19 @@ NixOS doesn't use a standard FHS filesystem so you can't use `apt` or `pacman`. 
     pkgs.xorg.libXfixes
     pkgs.xorg.libXrandr
     pkgs.xorg.libxcb
+    pkgs.xorg.libXcursor
+    pkgs.xorg.libXi
   ];
 }
 ```
 
-> **Note:** `libgbm` is a **separate Nix package** from `mesa` — you need both. Also skip `--with-deps` when running `playwright install chromium` on NixOS, it will try to call `apt` and fail.
-
-### macOS
-
-Playwright handles everything on macOS — no extra steps needed after:
-
-```bash
-pip install vipertls
-vipertls install-browsers
-```
-
-If Chromium still crashes, install XQuartz:
-
-```bash
-brew install --cask xquartz
-```
+> **Note:** `libgbm` is a **separate Nix package** from `mesa` — you need both. `vipertls install-browsers` automatically detects NixOS and skips `--with-deps` (which would try to call `apt` and fail). Just run it directly — no flags needed.
 
 ---
 
 ## Verifying Your Setup
 
-After installing libs and running `vipertls install-browsers`, you can confirm the browser works:
+After installing libs and running `vipertls install-browsers`:
 
 ```bash
 python3 -c "
@@ -224,13 +226,15 @@ with sync_playwright() as p:
 "
 ```
 
-If that prints `OK: Example Domain` your setup is good. If it throws a library error, check `ldd` on the Chromium binary to see what's still missing:
+If that prints `OK: Example Domain` your setup is good. If it throws a library error on Linux, check `ldd` on the Chromium binary to see what is still missing:
 
 ```bash
-# Find the chromium binary path
-python3 -c "from playwright._impl._driver import compute_driver_executable; import pathlib; print(pathlib.Path(compute_driver_executable()).parent.parent)"
-
-# Then run ldd on it (Linux only)
+python3 -c "
+from playwright._impl._driver import compute_driver_executable
+import pathlib
+print(pathlib.Path(compute_driver_executable()).parent.parent)
+"
+# then:
 ldd ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome | grep "not found"
 ```
 
@@ -245,7 +249,7 @@ import asyncio
 import vipertls
 
 async def main():
-    async with vipertls.AsyncClient(impersonate="edge_133", debug_messages=True) as client:
+    async with vipertls.AsyncClient(impersonate="chrome_145", debug_messages=True) as client:
         response = await client.get("https://www.crunchyroll.com/")
         print(response.status_code)
         print(response.solved_by)
@@ -257,8 +261,6 @@ asyncio.run(main())
 ---
 
 ## Ways to Use ViperTLS
-
-ViperTLS can be used in three main ways, depending on what kind of integration you need:
 
 ### 1. As a Python module
 
@@ -344,15 +346,34 @@ async def main():
 asyncio.run(main())
 ```
 
+### HTTP/3
+
+```python
+async with vipertls.AsyncClient(impersonate="chrome_145", http3=True) as client:
+    r = await client.get("https://example.com/")
+    print(r.http_version)
+```
+
+Passing `http3=True` forces QUIC from the first request. Without it, ViperTLS still detects `alt-svc: h3=` headers and upgrades automatically on subsequent requests to the same host.
+
+### Sync Client
+
+```python
+import vipertls
+
+client = vipertls.Client(impersonate="firefox_136", timeout=30)
+r = client.get("https://www.tempmail.la/")
+print(r.status_code)
+print(r.text[:500])
+```
+
 ### Solver States
 
 When you inspect a response, `r.solved_by` tells you how ViperTLS got through:
 
-- `tls` — direct request worked immediately
+- `tls` — direct request worked, TLS fingerprint was enough
 - `browser` — direct request hit a challenge and the browser solver resolved it
-- `cache` — an earlier browser solve already produced valid cookies, so ViperTLS reused them
-
-The extra response metadata is available directly on the Python object:
+- `cache` — an earlier browser solve already produced valid cookies, ViperTLS reused them
 
 ```python
 print(r.solved_by)
@@ -360,17 +381,6 @@ print(r.from_cache)
 print(r.cookies_received)
 print(r.cookies_used)
 print(r.solve_info)
-```
-
-### Sync Client
-
-```python
-import vipertls
-
-client = vipertls.Client(impersonate="firefox_127", timeout=30)
-r = client.get("https://www.tempmail.la/")
-print(r.status_code)
-print(r.text[:500])
 ```
 
 ### Response Object
@@ -391,6 +401,30 @@ r.cookies_used
 r.solve_info
 r.raise_for_status()
 ```
+
+### JA4 Fingerprint Family
+
+Every response exposes the full JA4 fingerprint suite so you can verify exactly what your request looked like from the server's perspective:
+
+```python
+r.ja4      # TLS ClientHello fingerprint
+r.ja4_r    # JA4 raw (unsorted, full values)
+r.ja4h     # HTTP header fingerprint
+r.ja4s     # Server hello fingerprint
+r.ja4l     # Latency fingerprint (connect_ms_handshake_ms)
+```
+
+Example values from a live Chrome 145 request:
+
+```
+ja4   = t13d1516h2_dea800f94266_0cba2f92bfc0
+ja4_r = t13d1516h2_47,53,156,157,4865,4866,4867,...
+ja4h  = ge20nn19enUS_fe5b4433ad44_effb3a958668
+ja4s  = t13d00_1301_000000000000
+ja4l  = 36_59
+```
+
+These are also available via `r.solve_info` as a dict.
 
 ### Runtime Helpers
 
@@ -414,7 +448,7 @@ import asyncio
 from vipertls import ViperDashboard
 
 async def main():
-    async with ViperDashboard(impersonate="chrome_124", timeout=30) as dash:
+    async with ViperDashboard(impersonate="chrome_145", timeout=30) as dash:
         await asyncio.gather(
             dash.get("https://www.crunchyroll.com/"),
             dash.get("https://tls.peet.ws/api/all", headers={"accept": "application/json"}),
@@ -441,7 +475,7 @@ Then:
 ```bash
 curl -s http://localhost:8080 \
   -H "X-Viper-URL: https://www.crunchyroll.com/" \
-  -H "X-Viper-Impersonate: chrome_124"
+  -H "X-Viper-Impersonate: chrome_145"
 ```
 
 ### Control Headers
@@ -450,7 +484,7 @@ curl -s http://localhost:8080 \
 |--------|-------------|---------|
 | `X-Viper-URL` | Target URL to request | `https://www.crunchyroll.com/api/...` |
 | `X-Viper-Method` | HTTP method | `POST` |
-| `X-Viper-Impersonate` | Browser preset name | `chrome_124`, `firefox_127`, `safari_17` |
+| `X-Viper-Impersonate` | Browser preset name | `chrome_145`, `firefox_136`, `safari_18` |
 | `X-Viper-Proxy` | Proxy URL | `socks5://user:pass@host:1080` |
 | `X-Viper-Timeout` | Request timeout in seconds | `30` |
 | `X-Viper-JA3` | Override JA3 fingerprint string | `771,4865-4866-4867,...` |
@@ -460,12 +494,16 @@ curl -s http://localhost:8080 \
 | `X-Viper-Body` | Request body as string | `{"key":"value"}` |
 | `X-Viper-Headers` | Extra headers as JSON string | `{"authorization":"Bearer ..."}` |
 
-The proxy response also includes ViperTLS-specific helper headers such as:
+The proxy response also includes ViperTLS-specific helper headers:
 
 - `X-ViperTLS-Solved-By`
 - `X-Viper-HTTP-Version`
 - `X-Viper-Received-Cookies`
 - `X-ViperTLS-Used-Cookies`
+- `X-ViperTLS-JA4`
+- `X-ViperTLS-JA4H`
+- `X-ViperTLS-JA4S`
+- `X-ViperTLS-JA4L`
 
 ---
 
@@ -494,20 +532,34 @@ curl -X POST http://127.0.0.1:8081/solve \
 
 ## Browser Presets
 
-| Preset | Alias | TLS Version | Pseudo-header order |
-|--------|-------|-------------|---------------------|
-| `chrome_124` | — | TLS 1.3 | `:method :authority :scheme :path` |
-| `chrome_131` | `chrome` | TLS 1.3 | `:method :authority :scheme :path` |
-| `firefox_127` | `firefox` | TLS 1.3 | `:method :path :authority :scheme` |
-| `safari_17` | `safari` | TLS 1.3 | `:method :authority :scheme :path` |
+| Preset | Alias | JA4 |
+|--------|-------|-----|
+| `chrome_145` | `chrome` | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `chrome_140` | — | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `chrome_136` | — | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `chrome_133` | — | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `chrome_131` | — | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `chrome_124` | — | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `chrome_120` | — | `t13d1515h2_dea800f94266_daa8e4778a3e` |
+| `firefox_136` | `firefox` | `t13d1814h2_f3ddd0d8df11_3bed559cf7b0` |
+| `firefox_133` | — | `t13d1814h2_f3ddd0d8df11_3bed559cf7b0` |
+| `firefox_127` | — | `t13d1814h2_f3ddd0d8df11_3bed559cf7b0` |
+| `firefox_120` | — | `t13d1814h2_f3ddd0d8df11_3bed559cf7b0` |
+| `safari_18` | `safari` | `t13d2214h2_bb4723730337_030652283baa` |
+| `safari_17` | — | `t13d2214h2_bb4723730337_030652283baa` |
+| `edge_136` | `edge` | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `edge_133` | — | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `brave_136` | `brave` | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
+| `opera_117` | `opera` | `t13d1516h2_dea800f94266_0cba2f92bfc0` |
 
-Aliases: `chrome` → `chrome_131`, `firefox` → `firefox_127`, `safari` → `safari_17`
+Short aliases: `chrome` → `chrome_145`, `firefox` → `firefox_136`, `safari` → `safari_18`, `edge` → `edge_136`, `brave` → `brave_136`, `opera` → `opera_117`
 
 ### Recommended Presets
 
-- `edge_133` — best default when you care about the browser-solver path
-- `chrome_*` — good default for TLS-first traffic
-- `firefox_*` — useful when you specifically want Firefox-like TLS and HTTP/2 behavior
+- `chrome_145` — best default for invisible Cloudflare and TLS-only targets; fast, no browser spin-up
+- `edge_133` — best default when you expect browser challenge fallback; maps well to the solver browser path
+- `firefox_136` — use when you specifically want Firefox TLS and HTTP/2 behavior
+- `safari_18` — use for targets that check for Safari-specific fingerprints
 
 ---
 
@@ -530,6 +582,48 @@ If you pass `ip:port` or `ip:port:user:pass`, ViperTLS treats it as an HTTP CONN
 
 ```python
 from vipertls import AsyncClient, ViperHTTPError, ViperConnectionError, ViperTimeoutError
+```
+
+---
+
+## Architecture
+
+```text
+AsyncClient.get("https://target.com/")
+         │
+         ▼
+  resolve_preset("chrome_145")   ←  ja4, ja4_r, quic_params auto-computed
+         │
+         ▼
+  parse_ja3(preset.ja3) → JA3Spec
+         │
+         ├── [proxy?] open_tunnel(host, 443, proxy_url)
+         │
+         ▼
+  open_tls_connection(preset, ja3)
+         ├─ pyOpenSSL SSL.Context (cffi, not ctypes)
+         ├─ SSL_CTX_set_ciphersuites()   ← TLS 1.3 cipher order
+         ├─ SSL_CTX_set1_groups_list()   ← elliptic curve order
+         ├─ socket.setblocking(True) before handshake → fast, no retry loop
+         └─ ctx.set_alpn_protos(preset.alpn)
+         │
+         ▼
+  selected_alpn_protocol()
+         ├── "h2"       → HTTP2Connection (custom SETTINGS + pseudo-header order)
+         ├── "http/1.1" → http1_request()
+         └── [http3=True or alt-svc] → HTTP3Connection (aioquic, QUIC params per browser)
+         │
+         ▼
+  ViperResponse
+         ├── .ja4 / .ja4_r  ← from preset
+         ├── .ja4h          ← computed from request headers
+         ├── .ja4s          ← computed from server hello
+         ├── .ja4l          ← connect_ms _ handshake_ms
+         └── .solved_by     ← "tls" | "browser" | "cache"
+         │
+         ▼
+  [403/503 + challenge markers?]
+         └── CloudflareSolver → Playwright Chromium → cookies → retry
 ```
 
 ---
@@ -563,63 +657,34 @@ python -m vipertls serve --host 0.0.0.0 --port 8080 --workers 4
 
 ### Important for Hosted Deployments
 
-- prefer Python `3.12`
-- Linux browser solving needs Playwright system dependencies
-- on Linux, use `vipertls install-browsers --with-deps` when the platform allows it
-- if the platform blocks system package installation, browser solving may fail even if TLS mode still works
+- Python 3.10+ is required; Python 3.12 or 3.13 are the most battle-tested hosted runtimes
+- Linux browser solving needs Playwright system dependencies (see System Requirements above)
+- On Replit / NixOS: add the Nix packages from the NixOS section, then run `vipertls install-browsers` — the NixOS auto-detection skips `--with-deps` automatically
+- If the platform blocks system package installation, browser solving may fail even if TLS mode still works
 
 ---
 
-## Architecture
+## Known Limitations
 
-```text
-AsyncClient.get("https://target.com/")
-         │
-         ▼
-  resolve_preset("chrome_124")
-         │
-         ▼
-  parse_ja3(preset.ja3) → JA3Spec
-         │
-         ├── [proxy?] open_tunnel(host, 443, proxy_url)
-         │
-         ▼
-  build_ssl_context(preset, ja3)
-         ├─ ctx.set_ciphers(tls12_ciphers)
-         ├─ ctypes → SSL_CTX_set_ciphersuites()
-         ├─ ctypes → SSL_CTX_set1_groups_list()
-         └─ ctx.set_alpn_protocols(["h2","http/1.1"])
-         │
-         ▼
-  ctx.wrap_socket(raw_sock, server_hostname=host)
-         │
-         ▼
-  selected_alpn_protocol()
-         ├── "h2"       → HTTP2Connection
-         └── "http/1.1" → http1_request()
-```
-
----
-
-## Known Limitations & Bugs
-
-- **No HTTP/3 / QUIC** — not implemented yet
 - **No connection pooling** — each request opens a fresh TLS connection
-- **ctypes approach is CPython-specific** — Python `3.13` disables the fragile direct pointer path
-- **No full browser profile emulation** — solver is practical, not magic
-- **Cloudflare behavior changes constantly**
+- **No WebSocket support**
+- **No SSE support**
+- **Cloudflare behavior changes constantly** — presets may need updating as detection evolves
+- **Browser solve is slow on first hit** (~20–30s) — subsequent hits use cache and are instant
 
 ---
 
 ## Roadmap
 
-- [ ] fuller JA4 support
-- [ ] HTTP/3 / QUIC
-- [ ] connection pooling and keep-alive
-- [ ] first-class cookie jar / session management
+- [x] JA4 fingerprint family (JA4, JA4_r, JA4H, JA4S, JA4L)
+- [x] HTTP/3 / QUIC via aioquic with per-browser QUIC transport params
+- [x] Python 3.10–3.14 support via pyOpenSSL (no ctypes, no CPython version dependency)
+- [x] NixOS / Replit auto-detection in browser installer
+- [ ] Connection pooling and keep-alive
+- [ ] First-class cookie jar / session management
 - [ ] WebSocket support
 - [ ] SSE support
-- [ ] more browser presets
+- [ ] More browser presets (Opera GX, Samsung, mobile Chrome/Safari)
 
 ---
 
@@ -633,6 +698,6 @@ MIT. Do whatever you want with it.
 
 **As always, Made By Walter.**
 
-**Built with Python, ctypes, questionable life choices, and a deep hatred of getting 403'd.**
+**Built with Python, pyOpenSSL, questionable life choices, and a deep hatred of getting 403'd.**
 
 </div>

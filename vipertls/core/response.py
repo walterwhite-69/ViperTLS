@@ -8,7 +8,7 @@ class ViperResponse:
     def __init__(
         self,
         status_code: int,
-        headers: dict[str, str],
+        headers: dict,
         content: bytes,
         url: str,
         http_version: str = "HTTP/2",
@@ -19,10 +19,10 @@ class ViperResponse:
         self.content = self._decompress(content)
         self.url = url
         self.http_version = http_version
-        self.set_cookies: list[str] = set_cookies or []
+        self.set_cookies: list = set_cookies or []
 
-    def _parse_cookie_pairs(self, values: list[str]) -> dict[str, str]:
-        parsed: dict[str, str] = {}
+    def _parse_cookie_pairs(self, values: list) -> dict:
+        parsed: dict = {}
         for item in values:
             first = item.split(";", 1)[0].strip()
             if "=" not in first:
@@ -32,7 +32,7 @@ class ViperResponse:
                 parsed[name] = value
         return parsed
 
-    def _parse_json_header(self, name: str) -> dict[str, str]:
+    def _parse_json_header(self, name: str) -> dict:
         raw = self.headers.get(name, "").strip()
         if not raw:
             return {}
@@ -108,14 +108,14 @@ class ViperResponse:
         return self.solved_by == "cache"
 
     @property
-    def cookies_received(self) -> dict[str, str]:
+    def cookies_received(self) -> dict:
         header_cookies = self._parse_json_header("x-viper-received-cookies")
         if header_cookies:
             return header_cookies
         return self._parse_cookie_pairs(self.set_cookies)
 
     @property
-    def cookies_used(self) -> dict[str, str]:
+    def cookies_used(self) -> dict:
         return self._parse_json_header("x-vipertls-used-cookies") or self._parse_json_header("x-viper-used-cookies")
 
     @property
@@ -131,20 +131,45 @@ class ViperResponse:
         return self.headers.get("x-vipertls-ja4-profile", "")
 
     @property
-    def solve_info(self) -> dict[str, Any]:
+    def ja4(self) -> str:
+        return self.headers.get("x-vipertls-ja4", "")
+
+    @property
+    def ja4_r(self) -> str:
+        return self.headers.get("x-vipertls-ja4-r", "")
+
+    @property
+    def ja4h(self) -> str:
+        return self.headers.get("x-vipertls-ja4h", "")
+
+    @property
+    def ja4s(self) -> str:
+        return self.headers.get("x-vipertls-ja4s", "")
+
+    @property
+    def ja4l(self) -> str:
+        return self.headers.get("x-vipertls-ja4l", "")
+
+    @property
+    def solve_info(self) -> dict:
         return {
             "solved_by": self.solved_by,
             "from_cache": self.from_cache,
             "http_version": self.http_version,
             "tls_resumed": self.tls_resumed,
             "h2_priority": self.h2_priority,
+            "ja4": self.ja4,
+            "ja4_r": self.ja4_r,
+            "ja4h": self.ja4h,
+            "ja4s": self.ja4s,
+            "ja4l": self.ja4l,
             "ja4_profile": self.ja4_profile,
             "cookies_received": self.cookies_received,
             "cookies_used": self.cookies_used,
         }
 
     @property
-    def meta(self) -> dict[str, Any]:
+    def meta(self) -> dict:
         return self.solve_info
 
     def raise_for_status(self) -> None:

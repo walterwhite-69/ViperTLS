@@ -8,6 +8,7 @@ import h2.events
 import h2.settings
 
 from ..fingerprints.presets import BrowserPreset
+from ..fingerprints.ja4 import compute_ja4h
 from .response import ViperResponse
 
 
@@ -34,14 +35,14 @@ _CHROMIUM_PRIORITY_PREFACE = (
 _CHROMIUM_PRIORITY_FAMILIES = ("chrome", "edge", "brave", "opera")
 
 
-def _parse_h2_fingerprint(fingerprint: str) -> tuple[dict, int, list[str]]:
+def _parse_h2_fingerprint(fingerprint: str) -> tuple:
     parts = fingerprint.split("|")
     if len(parts) != 4:
         raise ValueError(f"Invalid HTTP/2 fingerprint: {fingerprint!r}")
 
     settings_part, window_part, _, priority_part = parts
 
-    settings: dict[h2.settings.SettingCodes, int] = {}
+    settings: dict = {}
     for item in settings_part.split(";"):
         if ":" not in item:
             continue
@@ -64,10 +65,10 @@ def _build_header_list(
     scheme: str,
     path: str,
     query: str,
-    extra_headers: dict[str, str],
+    extra_headers: dict,
     preset: BrowserPreset,
-    pseudo_order: list[str],
-) -> list[tuple[str, str]]:
+    pseudo_order: list,
+) -> list:
     full_path = path if path else "/"
     if query:
         full_path = f"{full_path}?{query}"
@@ -79,7 +80,7 @@ def _build_header_list(
         ":path": full_path,
     }
 
-    result: list[tuple[str, str]] = []
+    result: list = []
     for pseudo in pseudo_order:
         if pseudo in pseudo_values:
             result.append((pseudo, pseudo_values[pseudo]))
@@ -108,7 +109,7 @@ def _build_header_list(
 
 
 class HTTP2Connection:
-    def __init__(self, ssl_sock: ssl.SSLSocket, preset: BrowserPreset) -> None:
+    def __init__(self, ssl_sock: object, preset: BrowserPreset) -> None:
         self._sock = ssl_sock
         self._preset = preset
         self._priority_enabled = any(name in preset.name.lower() for name in _CHROMIUM_PRIORITY_FAMILIES)
@@ -118,9 +119,6 @@ class HTTP2Connection:
         self._conn = h2.connection.H2Connection(
             config=h2.config.H2Configuration(client_side=True, header_encoding="utf-8")
         )
-                                                                            
-                                                                          
-                           
         self._conn.local_settings = h2.settings.Settings(
             client=True,
             initial_values=self._settings,
@@ -157,7 +155,7 @@ class HTTP2Connection:
         scheme: str,
         path: str,
         query: str,
-        headers: dict[str, str],
+        headers: dict,
         body: Optional[bytes],
         target_url: str,
     ) -> ViperResponse:
@@ -174,6 +172,11 @@ class HTTP2Connection:
         header_list = _build_header_list(
             method, host, scheme, path, query, headers, self._preset, self._pseudo_order
         )
+
+        try:
+            ja4h = compute_ja4h(method, "HTTP/2", header_list)
+        except Exception:
+            ja4h = ""
 
         if body:
             self._conn.send_headers(
@@ -199,9 +202,9 @@ class HTTP2Connection:
         self._flush()
 
         status_code = 0
-        resp_headers: dict[str, str] = {}
-        set_cookies: list[str] = []
-        body_chunks: list[bytes] = []
+        resp_headers: dict = {}
+        set_cookies: list = []
+        body_chunks: list = []
 
         while True:
             try:
@@ -257,6 +260,7 @@ class HTTP2Connection:
             headers={
                 **resp_headers,
                 "x-vipertls-h2-priority": "true" if self._priority_enabled else "false",
+                "x-vipertls-ja4h": ja4h,
             },
             content=b"".join(body_chunks),
             url=target_url,

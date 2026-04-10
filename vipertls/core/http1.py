@@ -6,6 +6,7 @@ from typing import Optional
 from urllib.parse import urlparse, urlencode
 
 from ..fingerprints.presets import BrowserPreset
+from ..fingerprints.ja4 import compute_ja4h
 from .response import ViperResponse
 
 
@@ -22,8 +23,13 @@ def _build_request_line(method: str, path: str, query: str) -> bytes:
     return f"{method.upper()} {full_path} HTTP/1.1\r\n".encode()
 
 
-def _serialize_headers(host: str, headers: dict[str, str], preset: BrowserPreset, body: Optional[bytes]) -> bytes:
-    ordered: list[tuple[str, str]] = []
+def _serialize_headers(
+    host: str,
+    headers: dict,
+    preset: BrowserPreset,
+    body: Optional[bytes],
+) -> tuple:
+    ordered: list = []
     headers_lower = {k.lower(): v for k, v in headers.items()}
 
     if "host" not in headers_lower:
@@ -51,10 +57,11 @@ def _serialize_headers(host: str, headers: dict[str, str], preset: BrowserPreset
 
     ordered.append(("Connection", "close"))
 
-    return "".join(f"{k}: {v}\r\n" for k, v in ordered).encode()
+    raw = "".join(f"{k}: {v}\r\n" for k, v in ordered).encode()
+    return raw, [(k, v) for k, v in ordered]
 
 
-def _recv_until_headers(sock: ssl.SSLSocket) -> tuple[bytes, bytes]:
+def _recv_until_headers(sock: object) -> tuple:
     buf = b""
     while b"\r\n\r\n" not in buf:
         chunk = sock.recv(4096)
@@ -67,16 +74,16 @@ def _recv_until_headers(sock: ssl.SSLSocket) -> tuple[bytes, bytes]:
     return buf[:sep], buf[sep + 4:]
 
 
-def _parse_status_line(line: bytes) -> tuple[int, str]:
+def _parse_status_line(line: bytes) -> tuple:
     parts = line.split(b" ", 2)
     status = int(parts[1])
     reason = parts[2].decode("latin-1").strip() if len(parts) > 2 else ""
     return status, reason
 
 
-def _parse_headers(raw: bytes) -> tuple[dict[str, str], list[str]]:
-    headers: dict[str, str] = {}
-    set_cookies: list[str] = []
+def _parse_headers(raw: bytes) -> tuple:
+    headers: dict = {}
+    set_cookies: list = []
     lines = raw.split(b"\r\n")
     for line in lines[1:]:
         if b":" not in line:
@@ -91,7 +98,7 @@ def _parse_headers(raw: bytes) -> tuple[dict[str, str], list[str]]:
     return headers, set_cookies
 
 
-def _read_chunked(sock: ssl.SSLSocket, initial: bytes) -> bytes:
+def _read_chunked(sock: object, initial: bytes) -> bytes:
     buf = initial
     body = b""
     while True:
@@ -120,7 +127,7 @@ def _read_chunked(sock: ssl.SSLSocket, initial: bytes) -> bytes:
     return body
 
 
-def _read_body(sock: ssl.SSLSocket, headers: dict[str, str], initial: bytes) -> bytes:
+def _read_body(sock: object, headers: dict, initial: bytes) -> bytes:
     encoding = headers.get("transfer-encoding", "").lower()
     if "chunked" in encoding:
         return _read_chunked(sock, initial)
@@ -150,21 +157,27 @@ def _read_body(sock: ssl.SSLSocket, headers: dict[str, str], initial: bytes) -> 
 
 
 def http1_request(
-    ssl_sock: ssl.SSLSocket,
+    ssl_sock: object,
     method: str,
     host: str,
     path: str,
     query: str,
-    headers: dict[str, str],
+    headers: dict,
     preset: BrowserPreset,
     body: Optional[bytes],
     target_url: str,
 ) -> ViperResponse:
     request = _build_request_line(method, path, query)
-    request += _serialize_headers(host, headers, preset, body)
+    header_bytes, ordered_headers = _serialize_headers(host, headers, preset, body)
+    request += header_bytes
     request += b"\r\n"
     if body:
         request += body
+
+    try:
+        ja4h = compute_ja4h(method, "HTTP/1.1", ordered_headers)
+    except Exception:
+        ja4h = ""
 
     ssl_sock.sendall(request)
 
@@ -174,6 +187,8 @@ def http1_request(
     resp_headers, set_cookies = _parse_headers(raw_headers)
 
     raw_body = _read_body(ssl_sock, resp_headers, leftover)
+
+    resp_headers["x-vipertls-ja4h"] = ja4h
 
     return ViperResponse(
         status_code=status_code,

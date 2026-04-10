@@ -2,6 +2,39 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 
+_CHROME_QUIC_PARAMS: dict = {
+    "max_data": 15728640,
+    "max_stream_data": 6291456,
+    "max_streams_bidi": 100,
+    "max_streams_uni": 100,
+    "idle_timeout": 30.0,
+}
+
+_FIREFOX_QUIC_PARAMS: dict = {
+    "max_data": 12582912,
+    "max_stream_data": 1048576,
+    "max_streams_bidi": 16,
+    "max_streams_uni": 16,
+    "idle_timeout": 30.0,
+}
+
+_SAFARI_QUIC_PARAMS: dict = {
+    "max_data": 15728640,
+    "max_stream_data": 6291456,
+    "max_streams_bidi": 100,
+    "max_streams_uni": 100,
+    "idle_timeout": 30.0,
+}
+
+_DEFAULT_QUIC_PARAMS: dict = {
+    "max_data": 15728640,
+    "max_stream_data": 6291456,
+    "max_streams_bidi": 100,
+    "max_streams_uni": 100,
+    "idle_timeout": 30.0,
+}
+
+
 @dataclass
 class BrowserPreset:
     name: str
@@ -12,6 +45,31 @@ class BrowserPreset:
     header_order: List[str]
     pseudo_header_order: List[str]
     default_headers: dict[str, str] = field(default_factory=dict)
+    ja4: str = field(default="")
+    ja4_r: str = field(default="")
+    quic_params: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.ja4 or not self.ja4_r:
+            try:
+                from .ja4 import ja4_from_preset
+                computed_ja4, computed_ja4_r = ja4_from_preset(self.ja3, self.alpn, sni=True)
+                if not self.ja4:
+                    self.ja4 = computed_ja4
+                if not self.ja4_r:
+                    self.ja4_r = computed_ja4_r
+            except Exception:
+                pass
+        if not self.quic_params:
+            n = self.name.lower()
+            if "firefox" in n:
+                self.quic_params = dict(_FIREFOX_QUIC_PARAMS)
+            elif "safari" in n:
+                self.quic_params = dict(_SAFARI_QUIC_PARAMS)
+            elif any(b in n for b in ("chrome", "edge", "brave", "opera")):
+                self.quic_params = dict(_CHROME_QUIC_PARAMS)
+            else:
+                self.quic_params = dict(_DEFAULT_QUIC_PARAMS)
 
 
 PRESETS: dict[str, BrowserPreset] = {

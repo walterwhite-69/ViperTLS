@@ -1,248 +1,144 @@
-import os
 import ssl
 import socket
-import struct
-import ctypes
-import ctypes.util
-import sys
+import select
+import time
 import threading
-from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
-from ..fingerprints.ja3 import JA3Spec
+from ..fingerprints.ja3 import JA3Spec, parse_ja3
 from ..fingerprints.presets import BrowserPreset
 
+try:
+    from OpenSSL.SSL import (
+        Context as _PyOSSLContext,
+        Connection as _PyOSSLConnection,
+        TLS_METHOD as _TLS_METHOD,
+        OP_NO_SSLv2 as _OP_NO_SSLv2,
+        OP_NO_SSLv3 as _OP_NO_SSLv3,
+        OP_NO_TLSv1 as _OP_NO_TLSv1,
+        OP_NO_TLSv1_1 as _OP_NO_TLSv1_1,
+        VERIFY_PEER as _VERIFY_PEER,
+        VERIFY_FAIL_IF_NO_PEER_CERT as _VERIFY_FAIL_IF_NO_PEER_CERT,
+        ZeroReturnError as _ZeroReturnError,
+        SysCallError as _SysCallError,
+    )
+    from OpenSSL._util import ffi as _ossl_ffi, lib as _ossl_lib
+    _PYOSSL_AVAILABLE = True
+except Exception:
+    _PYOSSL_AVAILABLE = False
+    _PyOSSLContext = None
+    _PyOSSLConnection = None
+    _ossl_lib = None
 
-class _OpenSSLLib:
-    _instance: Optional["_OpenSSLLib"] = None
-    _lib: Optional[ctypes.CDLL] = None
+_SESSION_CACHE: dict = {}
+_SESSION_LOCK = threading.Lock()
+_CONTEXT_CACHE: dict = {}
+_CONTEXT_LOCK = threading.Lock()
 
-    def __new__(cls) -> "_OpenSSLLib":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._load()
-        return cls._instance
 
-    def _load(self) -> None:
-        candidates = self._candidate_paths()
+class _ViperSSLSocket:
+    def __init__(
+        self,
+        conn: Any,
+        raw_sock: socket.socket,
+        session_reused: bool = False,
+        connect_ms: float = 0.0,
+        handshake_ms: float = 0.0,
+    ) -> None:
+        self._conn = conn
+        self._raw = raw_sock
+        self._session_reused_flag = session_reused
+        self.connect_ms = connect_ms
+        self.handshake_ms = handshake_ms
 
-                                                                              
-                                                                                 
-                                                                                
-                                                                               
-                                                                                    
-        if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
-            _seen_dirs: set[str] = set()
-            for c in candidates:
-                dll_dir = str(Path(c).parent.resolve())
-                if dll_dir not in _seen_dirs:
-                    _seen_dirs.add(dll_dir)
-                    try:
-                                                                               
-                        if not hasattr(self, "_dll_dir_cookies"):
-                            self._dll_dir_cookies = []
-                        self._dll_dir_cookies.append(os.add_dll_directory(dll_dir))
-                    except (OSError, ValueError):
-                        pass
+    def sendall(self, data: bytes) -> None:
+        self._conn.sendall(data)
 
-        for candidate in candidates:
+    def recv(self, size: int) -> bytes:
+        while True:
             try:
-                self._lib = ctypes.CDLL(str(candidate))
-                return
-            except OSError:
-                continue
+                data = self._conn.recv(size)
+                return data if data is not None else b""
+            except Exception as exc:
+                exc_name = type(exc).__name__
+                if exc_name == "WantReadError":
+                    select.select([self._raw], [], [], 5.0)
+                    continue
+                if exc_name in ("ZeroReturnError", "SysCallError"):
+                    return b""
+                return b""
 
-    def _candidate_paths(self) -> list[str]:
-        candidates: list[str] = []
-        seen: set[str] = set()
-
-        def add(value: Optional[object]) -> None:
-            if not value:
-                return
-            path = str(value)
-            if path in seen:
-                return
-            seen.add(path)
-            candidates.append(path)
-
-                                        
-        for name in self._find_library_names():
-            found = ctypes.util.find_library(name)
-            if found:
-                add(found)
-
-                                                                             
-        for path in self._bundled_library_paths():
-            add(path)
-
-                                             
-        for path in self._fallback_library_names():
-            add(path)
-
-        return candidates
-
-    def _find_library_names(self) -> list[str]:
-        if sys.platform == "win32":
-            return ["libssl", "ssl"]
-        if sys.platform == "darwin":
-            return ["ssl", "libssl"]
-        return ["ssl", "libssl"]
-
-    def _bundled_library_paths(self) -> list[Path]:
-                                                      
-        root_seen: set[Path] = set()
-        roots: list[Path] = []
-
-        def _add_root(p: Path) -> None:
-            try:
-                p = p.resolve()
-            except OSError:
-                return
-            if p not in root_seen:
-                root_seen.add(p)
-                roots.append(p)
-
-                                                            
-        exe_dir = Path(sys.executable).resolve().parent
-        _add_root(exe_dir)
-        _add_root(exe_dir / "DLLs")
-
-                                                                  
+    def close(self) -> None:
         try:
-            _add_root(Path(ssl._ssl.__file__).resolve().parent)
-        except AttributeError:
+            self._conn.shutdown()
+        except Exception:
+            pass
+        try:
+            self._raw.close()
+        except Exception:
             pass
 
-                                                                         
-        pkg_bin = Path(__file__).resolve().parent.parent / "bin"
-        if pkg_bin.exists():
-            _add_root(pkg_bin)
-
-                                                                                 
-                                                                             
-                                                                                
-                                                           
-        base = getattr(sys, "base_prefix", None) or sys.prefix
-        if base and Path(base).resolve() != Path(sys.prefix).resolve():
-            base_path = Path(base).resolve()
-            _add_root(base_path)
-            _add_root(base_path / "DLLs")
-            _add_root(base_path / "Library" / "bin")                                
-
-                                                                         
-        python_home = os.environ.get("PYTHONHOME")
-        if python_home:
-            _add_root(Path(python_home))
-            _add_root(Path(python_home) / "DLLs")
-
-        if sys.platform == "win32":
-            names = ["libssl-3.dll", "libssl-1_1.dll", "libssl.dll"]
-        elif sys.platform == "darwin":
-            names = ["libssl.3.dylib", "libssl.1.1.dylib", "libssl.dylib"]
-        else:
-            names = ["libssl.so.3", "libssl.so.1.1", "libssl.so"]
-
-        seen: set[Path] = set()
-        candidates: list[Path] = []
-        for root in roots:
-            for name in names:
-                path = root / name
-                if path.exists() and path not in seen:
-                    seen.add(path)
-                    candidates.append(path)
-        return candidates
-
-    def _fallback_library_names(self) -> list[str]:
-        if sys.platform == "win32":
-            return ["libssl-3.dll", "libssl-1_1.dll", "libssl.dll"]
-        if sys.platform == "darwin":
-            return ["libssl.3.dylib", "libssl.1.1.dylib", "libssl.dylib"]
-        return ["libssl.so.3", "libssl.so.1.1", "libssl.so"]
+    def selected_alpn_protocol(self) -> Optional[str]:
+        try:
+            proto = self._conn.get_alpn_proto_negotiated()
+            if proto:
+                return proto.decode("utf-8")
+        except Exception:
+            pass
+        return None
 
     @property
-    def available(self) -> bool:
-        return self._lib is not None
+    def session_reused(self) -> bool:
+        return self._session_reused_flag
 
-    def set_groups_list(self, ssl_ctx_ptr: int, groups: str) -> bool:
-        if not self._lib:
-            return False
-        
-                                                       
+    def cipher(self) -> Optional[tuple]:
         try:
-            fn = self._lib.SSL_CTX_set1_groups_list
-            fn.restype = ctypes.c_int
-            fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-            if fn(ssl_ctx_ptr, groups.encode()) == 1:
-                return True
-        except AttributeError:
+            name = self._conn.get_cipher_name()
+            version = self._conn.get_cipher_version()
+            bits = self._conn.get_cipher_bits()
+            if name:
+                return (name, version or "", bits or 0)
+        except Exception:
+            pass
+        return None
+
+    def version(self) -> Optional[str]:
+        try:
+            return self._conn.get_protocol_version_name()
+        except Exception:
+            return None
+
+    def getpeercert(self, binary_form: bool = False) -> Any:
+        return None
+
+    def fileno(self) -> int:
+        try:
+            return self._raw.fileno()
+        except Exception:
+            return -1
+
+    def settimeout(self, timeout: Optional[float]) -> None:
+        try:
+            self._raw.settimeout(timeout)
+        except Exception:
             pass
 
-                                                            
-        try:
-            fn = self._lib.SSL_CTX_set1_curves_list
-            fn.restype = ctypes.c_int
-            fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-            if fn(ssl_ctx_ptr, groups.encode()) == 1:
-                return True
-        except AttributeError:
-            pass
 
-                                                                       
-                                             
-        try:
-            fn = self._lib.SSL_CTX_ctrl
-            fn.restype = ctypes.c_long
-            fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long, ctypes.c_char_p]
-                                        
-            return fn(ssl_ctx_ptr, 92, 0, groups.encode()) == 1
-        except AttributeError:
-            return False
-
-    def set_tls13_ciphersuites(self, ssl_ctx_ptr: int, ciphers: str) -> bool:
-        if not self._lib:
-            return False
-        try:
-            fn = self._lib.SSL_CTX_set_ciphersuites
-            fn.restype = ctypes.c_int
-            fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-            return fn(ssl_ctx_ptr, ciphers.encode()) == 1
-        except AttributeError:
-            return False
-
-
-_openssl = _OpenSSLLib()
-_SESSION_CACHE: dict[tuple[str, int, str], object] = {}
-_SESSION_CACHE_LOCK = threading.Lock()
-_CONTEXT_CACHE: dict[tuple[object, ...], ssl.SSLContext] = {}
-_CONTEXT_CACHE_LOCK = threading.Lock()
-_CTX_PTR_SUPPORTED = sys.implementation.name == "cpython" and sys.version_info < (3, 13)
-
-
-def _extract_ssl_ctx_ptr(ctx: ssl.SSLContext) -> int:
-    if not _CTX_PTR_SUPPORTED:
-        raise RuntimeError("direct SSLContext pointer access is disabled on this Python build")
-    raw = (ctypes.c_char * 24).from_address(id(ctx))
-    return struct.unpack_from("Q", raw, 16)[0]
-
-
-def _get_cached_session(key: tuple[str, int, str] | None) -> object | None:
+def _get_cached_session(key: Optional[tuple]) -> Any:
     if key is None:
         return None
-    with _SESSION_CACHE_LOCK:
+    with _SESSION_LOCK:
         return _SESSION_CACHE.get(key)
 
 
-def _store_cached_session(key: tuple[str, int, str] | None, sock: ssl.SSLSocket) -> None:
-    if key is None:
+def _store_session(key: Optional[tuple], session: Any) -> None:
+    if key is None or session is None:
         return
-    session = getattr(sock, "session", None)
-    if session is None:
-        return
-    with _SESSION_CACHE_LOCK:
+    with _SESSION_LOCK:
         _SESSION_CACHE[key] = session
 
 
-def _ja3_cache_key(ja3: JA3Spec | None) -> tuple[object, ...]:
+def _ja3_cache_key(ja3: Optional[JA3Spec]) -> tuple:
     if ja3 is None:
         return ("preset",)
     return (
@@ -255,21 +151,76 @@ def _ja3_cache_key(ja3: JA3Spec | None) -> tuple[object, ...]:
     )
 
 
-def _get_or_build_context(
+def _apply_tls13_ciphers(ctx_ptr: Any, ciphers: list) -> None:
+    if not _ossl_lib or not ciphers:
+        return
+    cipher_str = ":".join(ciphers).encode()
+    try:
+        if hasattr(_ossl_lib, "SSL_CTX_set_ciphersuites"):
+            _ossl_lib.SSL_CTX_set_ciphersuites(ctx_ptr, cipher_str)
+    except Exception:
+        pass
+
+
+def _apply_curve_groups(ctx_ptr: Any, curves: list) -> None:
+    if not _ossl_lib or not curves:
+        return
+    groups_str = ":".join(curves).encode()
+    try:
+        if hasattr(_ossl_lib, "SSL_CTX_set1_groups_list"):
+            _ossl_lib.SSL_CTX_set1_groups_list(ctx_ptr, groups_str)
+        elif hasattr(_ossl_lib, "SSL_CTX_set1_curves_list"):
+            _ossl_lib.SSL_CTX_set1_curves_list(ctx_ptr, groups_str)
+    except Exception:
+        pass
+
+
+def _build_pyossl_context(
+    preset: BrowserPreset,
+    ja3: Optional[JA3Spec],
+    verify: bool,
+) -> Any:
+    opts = _OP_NO_SSLv2 | _OP_NO_SSLv3 | _OP_NO_TLSv1 | _OP_NO_TLSv1_1
+    ctx = _PyOSSLContext(_TLS_METHOD)
+    ctx.set_options(opts)
+
+    if verify:
+        ctx.set_default_verify_paths()
+        ctx.set_verify(
+            _VERIFY_PEER | _VERIFY_FAIL_IF_NO_PEER_CERT,
+            lambda conn, cert, errnum, depth, ok: ok,
+        )
+    else:
+        ctx.set_verify(0, lambda conn, cert, errnum, depth, ok: True)
+
+    ja3_spec = ja3 if ja3 is not None else _safe_parse_ja3(preset.ja3)
+
+    if ja3_spec:
+        if ja3_spec.tls12_ciphers:
+            try:
+                ctx.set_cipher_list(":".join(ja3_spec.tls12_ciphers).encode())
+            except Exception:
+                pass
+
+        if ja3_spec.tls13_ciphers:
+            _apply_tls13_ciphers(ctx._context, ja3_spec.tls13_ciphers)
+
+        if ja3_spec.curve_names:
+            _apply_curve_groups(ctx._context, ja3_spec.curve_names)
+
+    try:
+        ctx.set_alpn_protos([p.encode() for p in preset.alpn])
+    except Exception:
+        pass
+
+    return ctx
+
+
+def _build_stdlib_context(
     preset: BrowserPreset,
     ja3: Optional[JA3Spec],
     verify: bool,
 ) -> ssl.SSLContext:
-    key = (preset.name, verify, *_ja3_cache_key(ja3))
-    with _CONTEXT_CACHE_LOCK:
-        ctx = _CONTEXT_CACHE.get(key)
-        if ctx is None:
-            ctx = build_ssl_context(preset, ja3=ja3, verify=verify)
-            _CONTEXT_CACHE[key] = ctx
-        return ctx
-
-
-def build_ssl_context(preset: BrowserPreset, ja3: Optional[JA3Spec] = None, verify: bool = True) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
     if not verify:
@@ -280,82 +231,47 @@ def build_ssl_context(preset: BrowserPreset, ja3: Optional[JA3Spec] = None, veri
         ctx.check_hostname = True
         ctx.load_default_certs()
 
-    ctx.options |= ssl.OP_NO_SSLv2 if hasattr(ssl, "OP_NO_SSLv2") else 0
-    ctx.options |= ssl.OP_NO_SSLv3 if hasattr(ssl, "OP_NO_SSLv3") else 0
-    ctx.options &= ~ssl.OP_NO_TLSv1_3 if hasattr(ssl, "OP_NO_TLSv1_3") else 0
+    for flag in ("OP_NO_SSLv2", "OP_NO_SSLv3"):
+        if hasattr(ssl, flag):
+            ctx.options |= getattr(ssl, flag)
 
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.maximum_version = ssl.TLSVersion.TLSv1_3
 
-    if ja3 is not None:
-        _apply_ja3(ctx, ja3)
-    else:
-        _apply_preset_ciphers(ctx, preset)
+    ja3_spec = ja3 if ja3 is not None else _safe_parse_ja3(preset.ja3)
+    if ja3_spec and ja3_spec.tls12_ciphers:
+        try:
+            ctx.set_ciphers(":".join(ja3_spec.tls12_ciphers))
+        except ssl.SSLError:
+            pass
 
     ctx.set_alpn_protocols(preset.alpn)
-
     return ctx
 
 
-def _apply_ja3(ctx: ssl.SSLContext, ja3: JA3Spec) -> None:
-    tls12_ciphers = [c for c in ja3.tls12_ciphers if c]
-    if tls12_ciphers:
-        try:
-            ctx.set_ciphers(":".join(tls12_ciphers))
-        except ssl.SSLError:
-            pass
-
-    if ja3.tls13_ciphers and _openssl.available:
-        try:
-            ctx_ptr = _extract_ssl_ctx_ptr(ctx)
-            _openssl.set_tls13_ciphersuites(ctx_ptr, ":".join(ja3.tls13_ciphers))
-        except Exception:
-            pass
-
-    if ja3.curve_names and _openssl.available:
-        try:
-            ctx_ptr = _extract_ssl_ctx_ptr(ctx)
-            _openssl.set_groups_list(ctx_ptr, ":".join(ja3.curve_names))
-        except Exception:
-            pass
-
-
-def _apply_preset_ciphers(ctx: ssl.SSLContext, preset: BrowserPreset) -> None:
-    from ..fingerprints.ja3 import parse_ja3
+def _safe_parse_ja3(ja3_str: str) -> Optional[JA3Spec]:
     try:
-        ja3_spec = parse_ja3(preset.ja3)
-        _apply_ja3(ctx, ja3_spec)
+        return parse_ja3(ja3_str)
     except Exception:
-        pass
+        return None
 
 
-def wrap_socket(
-    raw_sock: socket.socket,
-    host: str,
-    ctx: ssl.SSLContext,
-    server_side: bool = False,
-    session_key: tuple[str, int, str] | None = None,
-) -> ssl.SSLSocket:
-    kwargs = {
-        "server_hostname": host if not server_side else None,
-        "server_side": server_side,
-        "do_handshake_on_connect": True,
-    }
-    session = _get_cached_session(session_key)
-    if session is not None:
-        try:
-            sock = ctx.wrap_socket(raw_sock, session=session, **kwargs)
-            _store_cached_session(session_key, sock)
-            return sock
-        except TypeError:
-            pass
-        except ValueError:
-            pass
-        except ssl.SSLError:
-            pass
-    sock = ctx.wrap_socket(raw_sock, **kwargs)
-    _store_cached_session(session_key, sock)
-    return sock
+def _get_or_build_context(
+    preset: BrowserPreset,
+    ja3: Optional[JA3Spec],
+    verify: bool,
+    pyossl: bool,
+) -> Any:
+    key = (preset.name, verify, pyossl, *_ja3_cache_key(ja3))
+    with _CONTEXT_LOCK:
+        ctx = _CONTEXT_CACHE.get(key)
+        if ctx is None:
+            if pyossl and _PYOSSL_AVAILABLE:
+                ctx = _build_pyossl_context(preset, ja3, verify)
+            else:
+                ctx = _build_stdlib_context(preset, ja3, verify)
+            _CONTEXT_CACHE[key] = ctx
+    return ctx
 
 
 def open_tls_connection(
@@ -366,8 +282,111 @@ def open_tls_connection(
     proxy_sock: Optional[socket.socket] = None,
     timeout: int = 30,
     verify: bool = True,
+) -> Any:
+    if _PYOSSL_AVAILABLE:
+        try:
+            return _open_pyossl(host, port, preset, ja3, proxy_sock, timeout, verify)
+        except Exception:
+            pass
+    return _open_stdlib(host, port, preset, ja3, proxy_sock, timeout, verify)
+
+
+def _do_handshake_with_timeout(conn: Any, raw_sock: socket.socket, timeout: int) -> None:
+    deadline = time.perf_counter() + timeout
+    while True:
+        try:
+            conn.do_handshake()
+            return
+        except Exception as exc:
+            exc_name = type(exc).__name__
+            if exc_name in ("WantReadError", "WantWriteError"):
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise TimeoutError("TLS handshake timed out") from exc
+                if exc_name == "WantReadError":
+                    select.select([raw_sock], [], [], min(remaining, 1.0))
+                else:
+                    select.select([], [raw_sock], [], min(remaining, 1.0))
+            else:
+                raise
+
+
+def _open_pyossl(
+    host: str,
+    port: int,
+    preset: BrowserPreset,
+    ja3: Optional[JA3Spec],
+    proxy_sock: Optional[socket.socket],
+    timeout: int,
+    verify: bool,
+) -> _ViperSSLSocket:
+    ctx = _get_or_build_context(preset, ja3, verify, pyossl=True)
+    session_key = (host, port, preset.name)
+    cached_session = _get_cached_session(session_key)
+
+    t_connect_start = time.perf_counter()
+    if proxy_sock is not None:
+        raw = proxy_sock
+        raw.settimeout(timeout)
+    else:
+        raw = socket.create_connection((host, port), timeout=timeout)
+    connect_ms = (time.perf_counter() - t_connect_start) * 1000
+
+    raw.setblocking(True)
+
+    conn = _PyOSSLConnection(ctx, raw)
+    conn.set_tlsext_host_name(host.encode())
+    conn.set_connect_state()
+
+    pre_session_set = False
+    if cached_session is not None:
+        try:
+            conn.set_session(cached_session)
+            pre_session_set = True
+        except Exception:
+            pass
+
+    t_hs_start = time.perf_counter()
+    conn.do_handshake()
+    handshake_ms = (time.perf_counter() - t_hs_start) * 1000
+
+    raw.settimeout(timeout)
+
+    session_reused = False
+    if pre_session_set:
+        try:
+            new_sess = conn.get_session()
+            if new_sess and cached_session:
+                session_reused = new_sess.get_id() == cached_session.get_id()
+        except Exception:
+            pass
+
+    try:
+        new_session = conn.get_session()
+        _store_session(session_key, new_session)
+    except Exception:
+        pass
+
+    return _ViperSSLSocket(
+        conn, raw,
+        session_reused=session_reused,
+        connect_ms=connect_ms,
+        handshake_ms=handshake_ms,
+    )
+
+
+def _open_stdlib(
+    host: str,
+    port: int,
+    preset: BrowserPreset,
+    ja3: Optional[JA3Spec],
+    proxy_sock: Optional[socket.socket],
+    timeout: int,
+    verify: bool,
 ) -> ssl.SSLSocket:
-    ctx = _get_or_build_context(preset, ja3=ja3, verify=verify)
+    ctx = _get_or_build_context(preset, ja3, verify, pyossl=False)
+    session_key = (host, port, preset.name)
+    cached_session = _get_cached_session(session_key)
 
     if proxy_sock is not None:
         raw = proxy_sock
@@ -375,4 +394,70 @@ def open_tls_connection(
     else:
         raw = socket.create_connection((host, port), timeout=timeout)
 
-    return wrap_socket(raw, host, ctx, session_key=(host, port, preset.name))
+    kwargs: dict = {
+        "server_hostname": host,
+        "server_side": False,
+        "do_handshake_on_connect": True,
+    }
+
+    if cached_session is not None:
+        try:
+            sock = ctx.wrap_socket(raw, session=cached_session, **kwargs)
+            session = getattr(sock, "session", None)
+            _store_session(session_key, session)
+            return sock
+        except Exception:
+            pass
+
+    sock = ctx.wrap_socket(raw, **kwargs)
+    session = getattr(sock, "session", None)
+    _store_session(session_key, session)
+    return sock
+
+
+def build_ssl_context(
+    preset: BrowserPreset,
+    ja3: Optional[JA3Spec] = None,
+    verify: bool = True,
+) -> Any:
+    if _PYOSSL_AVAILABLE:
+        try:
+            return _build_pyossl_context(preset, ja3, verify)
+        except Exception:
+            pass
+    return _build_stdlib_context(preset, ja3, verify)
+
+
+def wrap_socket(
+    raw_sock: socket.socket,
+    host: str,
+    ctx: Any,
+    server_side: bool = False,
+    session_key: Optional[tuple] = None,
+) -> Any:
+    if _PYOSSL_AVAILABLE and isinstance(ctx, _PyOSSLContext):
+        conn = _PyOSSLConnection(ctx, raw_sock)
+        if not server_side:
+            conn.set_tlsext_host_name(host.encode())
+            conn.set_connect_state()
+        else:
+            conn.set_accept_state()
+        conn.do_handshake()
+        return _ViperSSLSocket(conn, raw_sock)
+
+    kwargs: dict = {
+        "server_hostname": host if not server_side else None,
+        "server_side": server_side,
+        "do_handshake_on_connect": True,
+    }
+    cached = _get_cached_session(session_key)
+    if cached is not None:
+        try:
+            sock = ctx.wrap_socket(raw_sock, session=cached, **kwargs)
+            _store_session(session_key, getattr(sock, "session", None))
+            return sock
+        except Exception:
+            pass
+    sock = ctx.wrap_socket(raw_sock, **kwargs)
+    _store_session(session_key, getattr(sock, "session", None))
+    return sock

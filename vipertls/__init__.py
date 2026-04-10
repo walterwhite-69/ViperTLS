@@ -11,7 +11,7 @@ from .fingerprints.presets import resolve_preset, PRESETS, BrowserPreset
 from .runtime import describe_runtime_paths
 from .solver.browser import clear_cache as clear_solver_cache
 
-__version__ = "0.1.3"
+__version__ = "0.1.8"
 __all__ = [
     "AsyncClient",
     "Client",

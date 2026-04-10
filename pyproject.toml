@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vipertls"
-version = "0.1.3"
+version = "0.1.8"
 description = "Pure Python TLS fingerprint spoofing client with browser challenge fallback."
-readme = "README.md"
+readme = {file = "pypi.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "vipertls" }]
@@ -21,6 +21,8 @@ dependencies = [
   "playwright>=1.40.0",
   "playwright-stealth>=2.0.0",
   "rich>=13.7.0",
+  "pyOpenSSL>=23.0.0",
+  "aioquic>=0.9.25",
 ]
 keywords = ["tls", "ja3", "http2", "playwright", "cloudflare"]
 classifiers = [
@@ -28,6 +30,8 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Operating System :: OS Independent",
 ]
 

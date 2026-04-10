@@ -10,7 +10,8 @@ from urllib.parse import urlparse, urlencode, urljoin
 
 from .fingerprints.ja3 import parse_ja3, JA3Spec
 from .fingerprints.presets import BrowserPreset, resolve_preset
-from .core.tls import open_tls_connection
+from .fingerprints.ja4 import compute_ja4s, compute_ja4l
+from .core.tls import open_tls_connection, _ViperSSLSocket
 from .core.http1 import http1_request
 from .core.http2 import HTTP2Connection
 from .core.response import ViperResponse, ViperConnectionError, ViperTimeoutError
@@ -19,15 +20,29 @@ from .proxy.tunnel import open_tunnel
 
 _DEFAULT_TIMEOUT = 30
 _MAX_REDIRECTS = 10
-
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-
 _CHROMIUM_NAMES = {"chrome", "edge", "brave", "opera"}
 _DEBUG_MESSAGES_DEFAULT = os.getenv("VIPERTLS_DEBUG_MESSAGES", "").lower() in {"1", "true", "yes", "on"}
 
+_CIPHER_NAME_TO_ID: dict = {
+    "TLS_AES_128_GCM_SHA256": 0x1301,
+    "TLS_AES_256_GCM_SHA384": 0x1302,
+    "TLS_CHACHA20_POLY1305_SHA256": 0x1303,
+    "ECDHE-RSA-AES128-GCM-SHA256": 0xC02F,
+    "ECDHE-RSA-AES256-GCM-SHA384": 0xC030,
+    "ECDHE-ECDSA-AES128-GCM-SHA256": 0xC02B,
+    "ECDHE-ECDSA-AES256-GCM-SHA384": 0xC02C,
+    "ECDHE-RSA-CHACHA20-POLY1305": 0xCCA8,
+    "ECDHE-ECDSA-CHACHA20-POLY1305": 0xCCA9,
+    "AES128-SHA": 0x002F,
+    "AES256-SHA": 0x0035,
+    "AES128-GCM-SHA256": 0x009C,
+    "AES256-GCM-SHA384": 0x009D,
+}
 
-def _parse_cookie_header(cookie_header: str) -> dict[str, str]:
-    parsed: dict[str, str] = {}
+
+def _parse_cookie_header(cookie_header: str) -> dict:
+    parsed: dict = {}
     for part in (cookie_header or "").split(";"):
         item = part.strip()
         if not item or "=" not in item:
@@ -38,7 +53,7 @@ def _parse_cookie_header(cookie_header: str) -> dict[str, str]:
     return parsed
 
 
-def _attach_used_cookie_headers(response: ViperResponse, headers: dict[str, str]) -> None:
+def _attach_used_cookie_headers(response: ViperResponse, headers: dict) -> None:
     cookie_header = headers.get("cookie", "").strip()
     if not cookie_header:
         return
@@ -52,14 +67,51 @@ def _attach_used_cookie_headers(response: ViperResponse, headers: dict[str, str]
 def _attach_transport_metadata(
     response: ViperResponse,
     *,
+    preset: Optional[BrowserPreset] = None,
     tls_resumed: bool | None = None,
     h2_priority: bool | None = None,
+    ssl_sock=None,
+    connect_ms: float = 0.0,
+    handshake_ms: float = 0.0,
 ) -> None:
     if tls_resumed is not None:
         response.headers["x-vipertls-tls-resumed"] = "true" if tls_resumed else "false"
     if h2_priority is not None and "x-vipertls-h2-priority" not in response.headers:
         response.headers["x-vipertls-h2-priority"] = "true" if h2_priority else "false"
-    if response.http_version == "HTTP/2":
+
+    if preset is not None:
+        response.headers["x-vipertls-ja4"] = preset.ja4
+        response.headers["x-vipertls-ja4-r"] = preset.ja4_r
+
+    if ssl_sock is not None:
+        try:
+            tls_version = None
+            cipher_name = None
+            cipher_id = None
+
+            if hasattr(ssl_sock, "version") and callable(ssl_sock.version):
+                tls_version = ssl_sock.version()
+            elif isinstance(ssl_sock, ssl.SSLSocket):
+                tls_version = ssl_sock.version()
+
+            if hasattr(ssl_sock, "cipher") and callable(ssl_sock.cipher):
+                cipher_info = ssl_sock.cipher()
+                if cipher_info:
+                    cipher_name = cipher_info[0]
+                    cipher_id = _CIPHER_NAME_TO_ID.get(cipher_name)
+
+            if tls_version:
+                ja4s = compute_ja4s(tls_version, cipher_name or "", cipher_id)
+                response.headers["x-vipertls-ja4s"] = ja4s
+        except Exception:
+            pass
+
+    if connect_ms > 0 or handshake_ms > 0:
+        response.headers["x-vipertls-ja4l"] = compute_ja4l(connect_ms, handshake_ms)
+
+    if response.http_version == "HTTP/3":
+        response.headers["x-vipertls-ja4-profile"] = "http3"
+    elif response.http_version == "HTTP/2":
         if response.headers.get("x-vipertls-h2-priority") == "true":
             response.headers["x-vipertls-ja4-profile"] = "chromium-h2-priority"
         else:
@@ -67,10 +119,13 @@ def _attach_transport_metadata(
     else:
         response.headers["x-vipertls-ja4-profile"] = "http1"
 
+    if "x-vipertls-ja4h" in response.headers:
+        pass
 
-def _build_ch_hints(preset: BrowserPreset, critical_ch_header: str) -> dict[str, str]:
+
+def _build_ch_hints(preset: BrowserPreset, critical_ch_header: str) -> dict:
     requested = {h.strip().lower() for h in critical_ch_header.split(",")}
-    hints: dict[str, str] = {}
+    hints: dict = {}
 
     name = preset.name.lower()
     if not any(b in name for b in _CHROMIUM_NAMES):
@@ -88,7 +143,7 @@ def _build_ch_hints(preset: BrowserPreset, critical_ch_header: str) -> dict[str,
         sec_ch_ua,
     )
 
-    ch_map: dict[str, str] = {
+    ch_map: dict = {
         "sec-ch-ua":                  sec_ch_ua,
         "sec-ch-ua-mobile":           preset.default_headers.get("sec-ch-ua-mobile", "?0"),
         "sec-ch-ua-platform":         preset.default_headers.get("sec-ch-ua-platform", '"Windows"'),
@@ -107,7 +162,7 @@ def _build_ch_hints(preset: BrowserPreset, critical_ch_header: str) -> dict[str,
     return hints
 
 
-def _inject_extended_ch(preset: BrowserPreset, headers: dict[str, str]) -> None:
+def _inject_extended_ch(preset: BrowserPreset, headers: dict) -> None:
     ua = preset.user_agent
     m = re.search(r"Chrome/([\d.]+)", ua)
     full_version = m.group(1) if m else "124.0.6367.60"
@@ -133,7 +188,7 @@ def _inject_extended_ch(preset: BrowserPreset, headers: dict[str, str]) -> None:
             headers[k] = v
 
 
-def _merge_headers(preset: BrowserPreset, overrides: dict[str, str]) -> dict[str, str]:
+def _merge_headers(preset: BrowserPreset, overrides: dict) -> dict:
     merged = dict(preset.default_headers)
     merged["user-agent"] = preset.user_agent
     for k, v in overrides.items():
@@ -147,6 +202,18 @@ def _resolve_redirect(base_url: str, location: str) -> str:
     if location.startswith("http://") or location.startswith("https://"):
         return location
     return urljoin(base_url, location)
+
+
+def _parse_alt_svc(alt_svc_header: str) -> Optional[int]:
+    for part in alt_svc_header.split(","):
+        part = part.strip()
+        if part.startswith("h3="):
+            port_part = part[3:].strip().strip('"')
+            try:
+                return int(port_part.lstrip(":").split(":")[0]) if ":" in port_part else None
+            except ValueError:
+                return None
+    return None
 
 
 async def _solve_cloudflare_challenge(
@@ -172,7 +239,7 @@ async def _solve_cloudflare_challenge(
         debug("Detected JS challenge")
         debug("Solving challenge")
     response.headers["x-vipertls-solved-by"] = "solving"
-    
+
     solver = await get_solver()
     started = time.perf_counter()
     try:
@@ -218,6 +285,7 @@ class AsyncClient:
         follow_redirects: bool = True,
         use_solver: bool = True,
         debug_messages: bool = _DEBUG_MESSAGES_DEFAULT,
+        http3: bool = False,
     ) -> None:
         self._preset: BrowserPreset = resolve_preset(impersonate)
         self._ja3: Optional[JA3Spec] = parse_ja3(ja3) if ja3 else None
@@ -227,6 +295,8 @@ class AsyncClient:
         self._follow_redirects = follow_redirects
         self._use_solver = use_solver
         self._debug_messages = debug_messages
+        self._force_h3 = http3
+        self._h3_hosts: dict = {}
 
     def _debug(self, message: str) -> None:
         if self._debug_messages:
@@ -236,7 +306,7 @@ class AsyncClient:
         self,
         method: str,
         url: str,
-        headers: Optional[dict[str, str]] = None,
+        headers: Optional[dict] = None,
         body: Optional[bytes] = None,
         **kwargs,
     ) -> ViperResponse:
@@ -249,7 +319,7 @@ class AsyncClient:
         cache = get_cache()
         domain = urlparse(url).netloc
         cached_data = cache.get(domain, self._preset.name)
-        
+
         cache_hit = False
         if cached_data:
             cookies_list, ua, hints = cached_data
@@ -258,18 +328,18 @@ class AsyncClient:
                 merged_headers["cookie"] += f"; {cookie_str}"
             else:
                 merged_headers["cookie"] = cookie_str
-            
+
             if ua:
                 merged_headers["user-agent"] = ua
             if hints:
                 merged_headers.update(hints)
-                
+
             cache_hit = True
             self._debug("Loaded cached cookies")
 
         while True:
             response = await self._send_single(method, current_url, merged_headers, body)
-            
+
             if cache_hit and response.status_code == 403:
                 from .solver.browser import is_challenge
                 if is_challenge(response.status_code, response.text):
@@ -322,6 +392,12 @@ class AsyncClient:
                 redirects += 1
                 continue
 
+            alt_svc = response.headers.get("alt-svc", "")
+            if alt_svc and not self._force_h3:
+                parsed_host = urlparse(current_url).netloc
+                if "h3=" in alt_svc:
+                    self._h3_hosts[parsed_host] = True
+
             if self._use_solver:
                 solved = await _solve_cloudflare_challenge(
                     response=response,
@@ -346,7 +422,7 @@ class AsyncClient:
         self,
         method: str,
         url: str,
-        headers: dict[str, str],
+        headers: dict,
         body: Optional[bytes],
     ) -> ViperResponse:
         parsed = urlparse(url)
@@ -356,19 +432,65 @@ class AsyncClient:
         query = parsed.query
         scheme = parsed.scheme
 
+        use_h3 = self._force_h3 or self._h3_hosts.get(parsed.netloc, False)
+
         loop = asyncio.get_event_loop()
 
         try:
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._send_blocking(method, host, port, scheme, path, query, headers, body, url),
-            )
+            if use_h3 and scheme == "https":
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._send_h3_blocking(method, host, port, scheme, path, query, headers, body, url),
+                )
+            else:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._send_blocking(method, host, port, scheme, path, query, headers, body, url),
+                )
         except TimeoutError as exc:
             raise ViperTimeoutError(f"Request timed out: {url}") from exc
         except (ssl.SSLError, socket.error, OSError) as exc:
             raise ViperConnectionError(f"Connection failed: {exc}") from exc
 
         return response
+
+    def _send_h3_blocking(
+        self,
+        method: str,
+        host: str,
+        port: int,
+        scheme: str,
+        path: str,
+        query: str,
+        headers: dict,
+        body: Optional[bytes],
+        target_url: str,
+    ) -> ViperResponse:
+        from .core.http3 import http3_request_blocking
+        try:
+            response = http3_request_blocking(
+                host=host,
+                port=port,
+                method=method,
+                path=path,
+                query=query,
+                headers=headers,
+                preset=self._preset,
+                body=body,
+                target_url=target_url,
+                scheme=scheme,
+                verify=self._verify,
+                timeout=self._timeout,
+            )
+            _attach_transport_metadata(
+                response,
+                preset=self._preset,
+                tls_resumed=False,
+                h2_priority=False,
+            )
+            return response
+        except Exception:
+            return self._send_blocking(method, host, port, scheme, path, query, headers, body, target_url)
 
     def _send_blocking(
         self,
@@ -378,7 +500,7 @@ class AsyncClient:
         scheme: str,
         path: str,
         query: str,
-        headers: dict[str, str],
+        headers: dict,
         body: Optional[bytes],
         target_url: str,
     ) -> ViperResponse:
@@ -401,6 +523,8 @@ class AsyncClient:
             )
             negotiated = ssl_sock.selected_alpn_protocol()
             tls_resumed = bool(getattr(ssl_sock, "session_reused", False))
+            connect_ms = getattr(ssl_sock, "connect_ms", 0.0)
+            handshake_ms = getattr(ssl_sock, "handshake_ms", 0.0)
 
             if negotiated == "h2":
                 conn = HTTP2Connection(ssl_sock, self._preset)
@@ -417,8 +541,12 @@ class AsyncClient:
                     )
                     _attach_transport_metadata(
                         response,
+                        preset=self._preset,
                         tls_resumed=tls_resumed,
                         h2_priority=response.headers.get("x-vipertls-h2-priority") == "true",
+                        ssl_sock=ssl_sock,
+                        connect_ms=connect_ms,
+                        handshake_ms=handshake_ms,
                     )
                     return response
                 finally:
@@ -436,7 +564,15 @@ class AsyncClient:
                         body=body,
                         target_url=target_url,
                     )
-                    _attach_transport_metadata(response, tls_resumed=tls_resumed, h2_priority=False)
+                    _attach_transport_metadata(
+                        response,
+                        preset=self._preset,
+                        tls_resumed=tls_resumed,
+                        h2_priority=False,
+                        ssl_sock=ssl_sock,
+                        connect_ms=connect_ms,
+                        handshake_ms=handshake_ms,
+                    )
                     return response
                 finally:
                     try:
@@ -457,7 +593,12 @@ class AsyncClient:
                     body=body,
                     target_url=target_url,
                 )
-                _attach_transport_metadata(response, tls_resumed=False, h2_priority=False)
+                _attach_transport_metadata(
+                    response,
+                    preset=self._preset,
+                    tls_resumed=False,
+                    h2_priority=False,
+                )
                 return response
             finally:
                 try:
@@ -465,22 +606,22 @@ class AsyncClient:
                 except Exception:
                     pass
 
-    async def get(self, url: str, headers: Optional[dict[str, str]] = None, **kw) -> ViperResponse:
+    async def get(self, url: str, headers: Optional[dict] = None, **kw) -> ViperResponse:
         return await self.request("GET", url, headers=headers, **kw)
 
-    async def post(self, url: str, headers: Optional[dict[str, str]] = None, body: Optional[bytes] = None, **kw) -> ViperResponse:
+    async def post(self, url: str, headers: Optional[dict] = None, body: Optional[bytes] = None, **kw) -> ViperResponse:
         return await self.request("POST", url, headers=headers, body=body, **kw)
 
-    async def put(self, url: str, headers: Optional[dict[str, str]] = None, body: Optional[bytes] = None, **kw) -> ViperResponse:
+    async def put(self, url: str, headers: Optional[dict] = None, body: Optional[bytes] = None, **kw) -> ViperResponse:
         return await self.request("PUT", url, headers=headers, body=body, **kw)
 
-    async def patch(self, url: str, headers: Optional[dict[str, str]] = None, body: Optional[bytes] = None, **kw) -> ViperResponse:
+    async def patch(self, url: str, headers: Optional[dict] = None, body: Optional[bytes] = None, **kw) -> ViperResponse:
         return await self.request("PATCH", url, headers=headers, body=body, **kw)
 
-    async def delete(self, url: str, headers: Optional[dict[str, str]] = None, **kw) -> ViperResponse:
+    async def delete(self, url: str, headers: Optional[dict] = None, **kw) -> ViperResponse:
         return await self.request("DELETE", url, headers=headers, **kw)
 
-    async def head(self, url: str, headers: Optional[dict[str, str]] = None, **kw) -> ViperResponse:
+    async def head(self, url: str, headers: Optional[dict] = None, **kw) -> ViperResponse:
         return await self.request("HEAD", url, headers=headers, **kw)
 
     async def __aenter__(self) -> "AsyncClient":

@@ -5,9 +5,17 @@ import threading
 import time
 import signal
 import argparse
-import msvcrt
+import select
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+_IS_WIN = sys.platform == "win32"
+
+if _IS_WIN:
+    import msvcrt
+else:
+    import termios
+    import tty
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -23,7 +31,7 @@ from vipertls.fingerprints.presets import PRESETS
 
 console = Console()
 
-_VERSION = "0.1.0"
+_VERSION = "0.1.8"
 _PRESETS_ORDER = [
     ("chrome_145", "Google Chrome"),
     ("chrome_140", "Google Chrome"),
@@ -85,6 +93,22 @@ def _install_middleware() -> None:
         preset = config.get("impersonate", "chrome_124").strip().strip('"').strip("'")
         method = request.method
 
+        entry = {
+            "time": _clock_now(),
+            "method": method,
+            "url": target,
+            "preset": preset,
+            "status": "…",
+            "size": 0,
+            "ms": 0.0,
+            "solved_by": "solving",
+        }
+
+        with _log_lock:
+            _request_log.insert(0, entry)
+            if len(_request_log) > 50:
+                _request_log.pop()
+
         response = await call_next(request)
 
         body = b""
@@ -94,25 +118,13 @@ def _install_middleware() -> None:
         elapsed = (time.perf_counter() - t0) * 1000
         size = len(body)
         status = response.status_code
-
         solved_by = response.headers.get("x-vipertls-solved-by", "fingerprint")
 
         with _log_lock:
-            _request_log.insert(
-                0,
-                {
-                    "time": _clock_now(),
-                    "method": method,
-                    "url": target,
-                    "preset": preset,
-                    "status": status,
-                    "size": size,
-                    "ms": elapsed,
-                    "solved_by": solved_by,
-                },
-            )
-            if len(_request_log) > 50:
-                _request_log.pop()
+            entry["status"] = status
+            entry["size"] = size
+            entry["ms"] = elapsed
+            entry["solved_by"] = solved_by
             _stats["total"] += 1
             _stats["bytes"] += size
             _stats["ms"] += elapsed
@@ -149,7 +161,9 @@ def _shorten(url: str, w: int = 48) -> str:
     return url if len(url) <= w else url[: w - 1] + "…"
 
 
-def _status_style(code: int) -> str:
+def _status_style(code) -> str:
+    if not isinstance(code, int):
+        return "bold bright_yellow"
     if code < 300:
         return "bold bright_green"
     if code < 400:
@@ -476,24 +490,33 @@ def _render(host: str, port: int) -> Group:
     return Group(header, _render_nav(), body, Rule(style="dim"), footer)
 
 
-def _poll_input() -> None:
+def _handle_key(ch: str) -> None:
     global _current_view, _selected_family_idx
-    while msvcrt.kbhit():
-        ch = msvcrt.getwch()
-        if ch == "1":
-            _current_view = "main"
-        elif ch == "2":
-            _current_view = "presets"
-        elif ch == "3":
-            _current_view = "guide"
-        elif ch == "4":
-            _current_view = "help"
-        elif ch in ("5", "6") and _current_view == "presets":
-            families = _preset_families()
-            if not families:
-                continue
-            step = -1 if ch == "5" else 1
-            _selected_family_idx = (_selected_family_idx + step) % len(families)
+    if ch == "1":
+        _current_view = "main"
+    elif ch == "2":
+        _current_view = "presets"
+    elif ch == "3":
+        _current_view = "guide"
+    elif ch == "4":
+        _current_view = "help"
+    elif ch in ("5", "6") and _current_view == "presets":
+        families = _preset_families()
+        if not families:
+            return
+        step = -1 if ch == "5" else 1
+        _selected_family_idx = (_selected_family_idx + step) % len(families)
+
+
+def _poll_input() -> None:
+    if _IS_WIN:
+        while msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            _handle_key(ch)
+    else:
+        while select.select([sys.stdin], [], [], 0)[0]:
+            ch = sys.stdin.read(1)
+            _handle_key(ch)
 
 
 def _start_server(host: str, port: int) -> None:
@@ -523,18 +546,41 @@ def main() -> None:
 
     def _shutdown(sig, frame):
         console.print("\n[bright_red]Shutting down ViperTLS…[/bright_red]")
+        if not _IS_WIN:
+            try:
+                termios.tcsetattr(_original_fd, termios.TCSADRAIN, _original_term)
+            except Exception:
+                pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    with Live(
-        _render(host, port), console=console, refresh_per_second=4, screen=True
-    ) as live:
-        while True:
-            _poll_input()
-            live.update(_render(host, port))
-            time.sleep(0.25)
+    _original_fd = None
+    _original_term = None
+
+    if not _IS_WIN:
+        try:
+            _original_fd = sys.stdin.fileno()
+            _original_term = termios.tcgetattr(_original_fd)
+            tty.setcbreak(_original_fd)
+        except Exception:
+            pass
+
+    try:
+        with Live(
+            _render(host, port), console=console, refresh_per_second=4, screen=True
+        ) as live:
+            while True:
+                _poll_input()
+                live.update(_render(host, port))
+                time.sleep(0.25)
+    finally:
+        if not _IS_WIN and _original_fd is not None and _original_term is not None:
+            try:
+                termios.tcsetattr(_original_fd, termios.TCSADRAIN, _original_term)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
