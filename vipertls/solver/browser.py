@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -237,6 +238,7 @@ def _find_browser_exec(family: str) -> Optional[str]:
             if matches:
                 return matches[0]
 
+    # --- Windows system-installed browsers ---
     system_candidates_map = {
         "edge": [
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
@@ -263,6 +265,56 @@ def _find_browser_exec(family: str) -> Optional[str]:
         expanded = os.path.expandvars(candidate)
         if os.path.exists(expanded):
             return expanded
+
+    # --- Linux / macOS system-installed browsers ---
+    if os.name != "nt":
+        linux_candidates_map: dict[str, list[str]] = {
+            "edge": [
+                "/usr/bin/microsoft-edge-stable",
+                "/usr/bin/microsoft-edge",
+                "/opt/microsoft/msedge/msedge",
+            ],
+            "brave": [
+                "/usr/bin/brave-browser",
+                "/usr/bin/brave-browser-stable",
+                "/opt/brave.com/brave/brave-browser",
+            ],
+            "opera": [
+                "/usr/bin/opera",
+                "/usr/lib/x86_64-linux-gnu/opera/opera",
+            ],
+            "chrome": [
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/google-chrome",
+                "/usr/bin/chromium-browser",
+                "/usr/bin/chromium",
+                "/opt/google/chrome/google-chrome",
+                "/snap/bin/chromium",
+            ],
+            "firefox": [
+                "/usr/bin/firefox",
+                "/usr/bin/firefox-esr",
+                "/usr/bin/firefox-developer-edition",
+            ],
+        }
+        linux_candidates = linux_candidates_map.get(family, []) + linux_candidates_map["chrome"]
+        for candidate in linux_candidates:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
+        # PATH-based lookup via shutil.which as final system fallback
+        which_names_map: dict[str, list[str]] = {
+            "edge": ["microsoft-edge-stable", "microsoft-edge"],
+            "brave": ["brave-browser", "brave-browser-stable"],
+            "opera": ["opera"],
+            "chrome": ["google-chrome-stable", "google-chrome", "chromium-browser", "chromium"],
+            "firefox": ["firefox", "firefox-esr", "firefox-developer-edition"],
+        }
+        which_names = which_names_map.get(family, []) + which_names_map["chrome"]
+        for name in which_names:
+            path = shutil.which(name)
+            if path:
+                return path
 
     _ensure_local_playwright_browser()
     for root in search_roots:
