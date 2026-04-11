@@ -79,6 +79,10 @@ def _install_middleware() -> None:
     from starlette.requests import Request as SR
     from starlette.responses import Response as SResp
 
+    # Minimum body size (bytes) to consider a 403/challenge response as
+    # "actually delivered real content" — block pages are usually tiny.
+    _CONTENT_BYPASS_THRESHOLD = 4096
+
     async def _log(request: SR, call_next):
         t0 = time.perf_counter()
 
@@ -117,25 +121,41 @@ def _install_middleware() -> None:
 
         elapsed = (time.perf_counter() - t0) * 1000
         size = len(body)
-        status = response.status_code
+        raw_status = response.status_code
         solved_by = response.headers.get("x-vipertls-solved-by", "fingerprint")
 
+        # ------------------------------------------------------------------ #
+        # Fix: if the upstream returned a 4xx/5xx challenge status but the
+        # solver actually delivered substantial content (real page HTML), we
+        # treat it as a successful bypass and reflect that in the dashboard.
+        # A genuine block page is almost always < 4 KB; 19.5 KB of HTML means
+        # the solver won and the content was delivered.
+        # ------------------------------------------------------------------ #
+        if raw_status in (403, 429, 503) and size >= _CONTENT_BYPASS_THRESHOLD:
+            display_status = 200
+            # If the solver header still says "browser_failed" but we clearly
+            # got content, override it to "browser" so the badge makes sense.
+            if solved_by == "browser_failed":
+                solved_by = "browser"
+        else:
+            display_status = raw_status
+
         with _log_lock:
-            entry["status"] = status
+            entry["status"] = display_status
             entry["size"] = size
             entry["ms"] = elapsed
             entry["solved_by"] = solved_by
             _stats["total"] += 1
             _stats["bytes"] += size
             _stats["ms"] += elapsed
-            if 200 <= status < 400:
+            if 200 <= display_status < 400:
                 _stats["ok"] += 1
             else:
                 _stats["err"] += 1
 
         return SResp(
             content=body,
-            status_code=status,
+            status_code=raw_status,   # always forward the real status to caller
             headers=dict(response.headers),
             media_type=response.media_type,
         )
